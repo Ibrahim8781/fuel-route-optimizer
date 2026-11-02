@@ -1,0 +1,446 @@
+{
+  "info": {
+    "name": "Fuel Route Optimizer",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Run the server (python manage.py runserver), then send these in order. Open the Visualize tab on a trip request to see the map."
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "Trips",
+      "item": [
+        {
+          "name": "1. Cross-country: New York -> Los Angeles",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"gallons = distance / 10 mpg\", () => pm.expect(body.summary.total_gallons).to.be.closeTo(body.summary.distance_miles / 10, 0.05));",
+                  "pm.test(\"stop costs add up to the total\", () => pm.expect(body.fuel_stops.reduce((t, s) => t + s.cost_usd, 0)).to.be.closeTo(body.summary.total_fuel_cost_usd, 0.05));",
+                  "pm.test(\"no single leg is longer than 500 miles\", () => {",
+                  "  const marks = [0, ...body.fuel_stops.map(s => s.mile_marker), body.summary.distance_miles];",
+                  "  for (let i = 1; i < marks.length; i++) pm.expect(marks[i] - marks[i - 1]).to.be.at.most(500.5);",
+                  "});",
+                  "pm.test(\"at most one routing API call\", () => pm.expect(body.meta.routing_api_calls).to.be.at.most(1));",
+                  "const template = `",
+                  "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">",
+                  "<div id=\"map\" style=\"height: 520px\"></div>",
+                  "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>",
+                  "<script>",
+                  "  pm.getData(function (err, plan) {",
+                  "    const map = L.map(\"map\");",
+                  "    L.tileLayer(\"https://tile.openstreetmap.org/{z}/{x}/{y}.png\", { attribution: \"&copy; OpenStreetMap\" }).addTo(map);",
+                  "    const line = L.polyline(plan.route.coordinates.map(c => [c[1], c[0]]), { color: \"#2563eb\", weight: 4 }).addTo(map);",
+                  "    map.fitBounds(line.getBounds());",
+                  "    plan.fuel_stops.forEach(s => L.marker([s.lat, s.lon]).addTo(map)",
+                  "      .bindTooltip(s.stop + \". \" + s.city + \", \" + s.state + \" $\" + s.price_per_gallon, { permanent: true }));",
+                  "  });",
+                  "</script>`;",
+                  "if (pm.response.code === 200) { pm.visualizer.set(template, pm.response.json()); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Long trip with several fuel stops. First call makes 1 routing API call.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=New York, NY&finish=Los Angeles, CA",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "New York, NY"
+                },
+                {
+                  "key": "finish",
+                  "value": "Los Angeles, CA"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "2. Same trip again (cached)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"gallons = distance / 10 mpg\", () => pm.expect(body.summary.total_gallons).to.be.closeTo(body.summary.distance_miles / 10, 0.05));",
+                  "pm.test(\"stop costs add up to the total\", () => pm.expect(body.fuel_stops.reduce((t, s) => t + s.cost_usd, 0)).to.be.closeTo(body.summary.total_fuel_cost_usd, 0.05));",
+                  "pm.test(\"no single leg is longer than 500 miles\", () => {",
+                  "  const marks = [0, ...body.fuel_stops.map(s => s.mile_marker), body.summary.distance_miles];",
+                  "  for (let i = 1; i < marks.length; i++) pm.expect(marks[i] - marks[i - 1]).to.be.at.most(500.5);",
+                  "});",
+                  "pm.test(\"at most one routing API call\", () => pm.expect(body.meta.routing_api_calls).to.be.at.most(1));",
+                  "pm.test(\"served from cache: 0 routing calls\", () => pm.expect(body.meta.routing_api_calls).to.eql(0));",
+                  "const template = `",
+                  "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">",
+                  "<div id=\"map\" style=\"height: 520px\"></div>",
+                  "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>",
+                  "<script>",
+                  "  pm.getData(function (err, plan) {",
+                  "    const map = L.map(\"map\");",
+                  "    L.tileLayer(\"https://tile.openstreetmap.org/{z}/{x}/{y}.png\", { attribution: \"&copy; OpenStreetMap\" }).addTo(map);",
+                  "    const line = L.polyline(plan.route.coordinates.map(c => [c[1], c[0]]), { color: \"#2563eb\", weight: 4 }).addTo(map);",
+                  "    map.fitBounds(line.getBounds());",
+                  "    plan.fuel_stops.forEach(s => L.marker([s.lat, s.lon]).addTo(map)",
+                  "      .bindTooltip(s.stop + \". \" + s.city + \", \" + s.state + \" $\" + s.price_per_gallon, { permanent: true }));",
+                  "  });",
+                  "</script>`;",
+                  "if (pm.response.code === 200) { pm.visualizer.set(template, pm.response.json()); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Identical request: 0 routing API calls, a few milliseconds.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=New York, NY&finish=Los Angeles, CA",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "New York, NY"
+                },
+                {
+                  "key": "finish",
+                  "value": "Los Angeles, CA"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "3. Short trip: Dallas -> Houston",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"gallons = distance / 10 mpg\", () => pm.expect(body.summary.total_gallons).to.be.closeTo(body.summary.distance_miles / 10, 0.05));",
+                  "pm.test(\"stop costs add up to the total\", () => pm.expect(body.fuel_stops.reduce((t, s) => t + s.cost_usd, 0)).to.be.closeTo(body.summary.total_fuel_cost_usd, 0.05));",
+                  "pm.test(\"no single leg is longer than 500 miles\", () => {",
+                  "  const marks = [0, ...body.fuel_stops.map(s => s.mile_marker), body.summary.distance_miles];",
+                  "  for (let i = 1; i < marks.length; i++) pm.expect(marks[i] - marks[i - 1]).to.be.at.most(500.5);",
+                  "});",
+                  "pm.test(\"at most one routing API call\", () => pm.expect(body.meta.routing_api_calls).to.be.at.most(1));",
+                  "const template = `",
+                  "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">",
+                  "<div id=\"map\" style=\"height: 520px\"></div>",
+                  "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>",
+                  "<script>",
+                  "  pm.getData(function (err, plan) {",
+                  "    const map = L.map(\"map\");",
+                  "    L.tileLayer(\"https://tile.openstreetmap.org/{z}/{x}/{y}.png\", { attribution: \"&copy; OpenStreetMap\" }).addTo(map);",
+                  "    const line = L.polyline(plan.route.coordinates.map(c => [c[1], c[0]]), { color: \"#2563eb\", weight: 4 }).addTo(map);",
+                  "    map.fitBounds(line.getBounds());",
+                  "    plan.fuel_stops.forEach(s => L.marker([s.lat, s.lon]).addTo(map)",
+                  "      .bindTooltip(s.stop + \". \" + s.city + \", \" + s.state + \" $\" + s.price_per_gallon, { permanent: true }));",
+                  "  });",
+                  "</script>`;",
+                  "if (pm.response.code === 200) { pm.visualizer.set(template, pm.response.json()); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Under 500 miles: one fill-up near the start.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Dallas, TX&finish=Houston, TX",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Dallas, TX"
+                },
+                {
+                  "key": "finish",
+                  "value": "Houston, TX"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "4. Coordinates and full state name",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"gallons = distance / 10 mpg\", () => pm.expect(body.summary.total_gallons).to.be.closeTo(body.summary.distance_miles / 10, 0.05));",
+                  "pm.test(\"stop costs add up to the total\", () => pm.expect(body.fuel_stops.reduce((t, s) => t + s.cost_usd, 0)).to.be.closeTo(body.summary.total_fuel_cost_usd, 0.05));",
+                  "pm.test(\"no single leg is longer than 500 miles\", () => {",
+                  "  const marks = [0, ...body.fuel_stops.map(s => s.mile_marker), body.summary.distance_miles];",
+                  "  for (let i = 1; i < marks.length; i++) pm.expect(marks[i] - marks[i - 1]).to.be.at.most(500.5);",
+                  "});",
+                  "pm.test(\"at most one routing API call\", () => pm.expect(body.meta.routing_api_calls).to.be.at.most(1));",
+                  "const template = `",
+                  "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">",
+                  "<div id=\"map\" style=\"height: 520px\"></div>",
+                  "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>",
+                  "<script>",
+                  "  pm.getData(function (err, plan) {",
+                  "    const map = L.map(\"map\");",
+                  "    L.tileLayer(\"https://tile.openstreetmap.org/{z}/{x}/{y}.png\", { attribution: \"&copy; OpenStreetMap\" }).addTo(map);",
+                  "    const line = L.polyline(plan.route.coordinates.map(c => [c[1], c[0]]), { color: \"#2563eb\", weight: 4 }).addTo(map);",
+                  "    map.fitBounds(line.getBounds());",
+                  "    plan.fuel_stops.forEach(s => L.marker([s.lat, s.lon]).addTo(map)",
+                  "      .bindTooltip(s.stop + \". \" + s.city + \", \" + s.state + \" $\" + s.price_per_gallon, { permanent: true }));",
+                  "  });",
+                  "</script>`;",
+                  "if (pm.response.code === 200) { pm.visualizer.set(template, pm.response.json()); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Inputs can be lat,lon or City, State.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=41.8781,-87.6298&finish=Denver, Colorado",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "41.8781,-87.6298"
+                },
+                {
+                  "key": "finish",
+                  "value": "Denver, Colorado"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Errors",
+      "item": [
+        {
+          "name": "Missing finish",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 with code invalid_request\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql(\"invalid_request\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Chicago, IL",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Chicago, IL"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Unknown city",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 with code invalid_location\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql(\"invalid_location\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Gotham, NY&finish=Chicago, IL",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Gotham, NY"
+                },
+                {
+                  "key": "finish",
+                  "value": "Chicago, IL"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Outside the USA",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 with code invalid_location\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql(\"invalid_location\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Toronto, ON&finish=Chicago, IL",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Toronto, ON"
+                },
+                {
+                  "key": "finish",
+                  "value": "Chicago, IL"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "No drivable route (Hawaii)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 with code routing_failed\", () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(pm.response.json().error.code).to.eql(\"routing_failed\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Uses 1 routing call; the provider finds no road route.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Honolulu, HI&finish=Los Angeles, CA",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Honolulu, HI"
+                },
+                {
+                  "key": "finish",
+                  "value": "Los Angeles, CA"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

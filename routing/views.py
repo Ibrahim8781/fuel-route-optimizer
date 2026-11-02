@@ -3,7 +3,7 @@ from django.urls import reverse
 from django.utils.http import urlencode
 from rest_framework import serializers, status
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from rest_framework.views import APIView, exception_handler
 
 from routing.services.locations import LocationError
 from routing.services.optimizer import FuelPlanError
@@ -18,6 +18,14 @@ class TripQuerySerializer(serializers.Serializer):
 
 def error_body(code: str, message: str, **extra) -> dict:
     return {"error": {"code": code, "message": message, **extra}}
+
+
+def api_exception_handler(exc, context):
+    """Give framework errors (throttling, wrong method, ...) the same shape as ours."""
+    response = exception_handler(exc, context)
+    if response is not None and isinstance(response.data, dict) and "detail" in response.data:
+        response.data = error_body(getattr(exc, "default_code", "error"), str(response.data["detail"]))
+    return response
 
 
 def run_plan(query) -> tuple[dict | None, dict | None, int]:

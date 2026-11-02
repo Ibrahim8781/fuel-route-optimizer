@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import requests
 from django.core.cache import cache
+from rest_framework.throttling import AnonRateThrottle
 
 from routing.models import FuelStation, Place
 from routing.services import ors
@@ -13,6 +14,7 @@ from routing.services.geo import haversine_miles
 from routing.services.locations import Location
 from routing.services.ors import Route, RoutingError, fetch_route
 from routing.services.stations import get_station_index
+from routing.views import RoutePlanView
 
 URL = "/api/route/"
 CHICAGO = (41.85, -87.6779)
@@ -138,6 +140,22 @@ def test_routing_failure_is_passed_through(client, trip_data):
         response = client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"})
     assert response.status_code == 422
     assert response.json()["error"] == {"code": "routing_failed", "message": "No drivable route"}
+
+
+def test_framework_errors_use_the_same_shape(client, db):
+    response = client.post(URL)
+    assert response.status_code == 405
+    assert response.json()["error"]["code"] == "method_not_allowed"
+
+
+def test_rate_limit(client, trip_data, mock_routing):
+    class TwoPerMinute(AnonRateThrottle):
+        rate = "2/minute"
+
+    with mock.patch.object(RoutePlanView, "throttle_classes", [TwoPerMinute]):
+        responses = [client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"}) for _ in range(3)]
+    assert [r.status_code for r in responses] == [200, 200, 429]
+    assert responses[-1].json()["error"]["code"] == "throttled"
 
 
 # --- OpenRouteService client --------------------------------------------------

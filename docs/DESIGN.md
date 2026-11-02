@@ -88,7 +88,7 @@ Stations near the route are sorted by **mile marker**. The tank holds 50 gallons
 
 **Why it's optimal:** every gallon burned between here and the next cheaper station has to be bought here or at a more expensive station, so buying it here is never worse. When nothing cheaper is in range, filling up here covers as many miles as possible at the lowest available price. The test suite checks this by comparing the result with an exact linear-program solver on 40 random routes.
 
-**Start:** the truck starts empty, so its first fill-up is the cheapest station within 25 miles of the start. The fuel used to reach it is billed at that station.
+**Start:** the truck starts empty, so its first fill-up is the cheapest station within 25 miles of the start. If there is none, it's the first station on the route. The fuel used to reach it is billed at that station.
 
 **Worked example** (from the tests): stations at mile 0 ($3.00), 400 ($4.00) and 700 ($3.50); the trip is 900 miles.
 - Mile 0 is the cheapest fuel in range: fill 50 gal and go to the cheapest in range, mile 400, arriving with 10 gal.
@@ -118,10 +118,11 @@ Compared with a simpler "always fill up at the cheapest reachable station" strat
 
 - **Performance:** no database access on the hot path (stations are in memory), vectorised numpy and a KD-tree, a 1-point-per-mile route, and a route cache. The heavy geometry comes last in the response.
 - **External API usage:** 1 call per new trip, 0 when cached. Per-IP rate limiting (default 60/min) protects the free quota.
+- **Consistent errors:** every error, including throttling and wrong HTTP method, returns `{"error": {"code", "message"}}`.
 - **Reliability:** 20 s timeout on the routing call. Provider errors map to clear HTTP statuses: 422 when no route exists, 503 for quota or key problems, 504 on timeout.
 - **Security:** secrets come from the environment (`.env` is git-ignored), and the app refuses to start without a secret key when DEBUG is off. Input lengths are validated, map popups escape station data, and the app has a minimal surface (no admin, sessions or auth).
 - **Observability:** every routing call is logged with its timing. Each response includes `meta` (routing API calls, cache hit, stations considered, elapsed ms).
-- **Testability:** 88 tests with no network. The core algorithm is a pure function.
+- **Testability:** 91 tests with no network. The core algorithm is a pure function.
 - **Scalability:** the web tier is stateless; with `REDIS_URL` set, all workers share the route cache. See the next steps for growing the data.
 
 ## 8. Limitations and next steps

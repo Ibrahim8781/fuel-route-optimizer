@@ -5,9 +5,9 @@ Model
 * The route is a line from mile 0 to `route_miles`. Each candidate station has
   a mile marker and a price. The tank holds `max_range / mpg` gallons.
 * The truck starts with an empty tank, so the first fill-up is the cheapest
-  station within the first `start_window` miles. The few miles driven to get
-  there are billed at that station, so total gallons always equal
-  route_miles / mpg.
+  station within the first `start_window` miles (or, if there is none, the
+  first station on the route). The miles driven to get there are billed at
+  that station, so total gallons always equal route_miles / mpg.
 * The truck may buy any amount at a stop and should arrive with an empty tank.
 
 Greedy rule (optimal for this model)
@@ -69,9 +69,10 @@ def plan_fuel_stops(
     if route_miles <= 0:
         return FuelPlan(purchases=[], total_gallons=0.0, total_cost=0.0)
 
-    first_window = [i for i, c in enumerate(stations) if c.mile <= min(start_window, route_miles)]
-    if not first_window:
-        raise FuelPlanError(f"No fuel station within {start_window:g} miles of the start.")
+    on_route = [i for i, s in enumerate(stations) if s.mile <= route_miles]
+    if not on_route or stations[on_route[0]].mile > max_range:
+        raise FuelPlanError(f"No fuel station within {max_range:g} miles of the start.")
+    first_window = [i for i in on_route if stations[i].mile <= start_window] or on_route[:1]
 
     tank = max_range / mpg
     miles = [s.mile for s in stations]
@@ -81,7 +82,7 @@ def plan_fuel_stops(
         if gallons > 1e-9:
             gallons_at[index] = gallons_at.get(index, 0.0) + gallons
 
-    # First fill-up: cheapest station near the start (nearest if prices tie).
+    # First fill-up: cheapest station near the start (nearer one if prices tie).
     current = min(first_window, key=lambda i: (stations[i].price, stations[i].mile))
     buy(current, stations[current].mile / mpg)  # fuel used to reach it
     fuel = 0.0  # gallons in the tank on arrival at `current`

@@ -74,7 +74,10 @@ def plan_trip(start_text: str, finish_text: str) -> dict:
             "max_range_miles": settings.FUEL_MAX_RANGE_MILES,
             "miles_per_gallon": settings.FUEL_MPG,
             "station_corridor_miles": settings.FUEL_CORRIDOR_MILES,
-            "starting_fuel": f"empty; first fill-up within {settings.FUEL_START_WINDOW_MILES:g} miles of the start",
+            "starting_fuel": (
+                f"empty; first fill-up at the cheapest station within {settings.FUEL_START_WINDOW_MILES:g} miles "
+                "(or the first station on the route), billed for the miles driven to reach it"
+            ),
         },
         "fuel_stops": stops,
         "meta": {

@@ -100,6 +100,7 @@ REST_FRAMEWORK = {
     # Protects the free routing API quota from a single noisy client.
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle"],
     "DEFAULT_THROTTLE_RATES": {"anon": os.environ.get("API_RATE_LIMIT", "60/minute")},
+    "EXCEPTION_HANDLER": "routing.views.api_exception_handler",
 }
 
 # --- Routing provider (OpenRouteService) ------------------------------------

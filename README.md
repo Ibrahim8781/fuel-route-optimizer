@@ -67,7 +67,7 @@ Response (trimmed, values illustrative):
   },
   "assumptions": {
     "max_range_miles": 500, "miles_per_gallon": 10, "station_corridor_miles": 5,
-    "starting_fuel": "empty; first fill-up within 25 miles of the start"
+    "starting_fuel": "empty; first fill-up at the cheapest station within 25 miles (...)"
   },
   "fuel_stops": [
     {
@@ -92,7 +92,8 @@ Response (trimmed, values illustrative):
 | 400 | `invalid_request` | `start` or `finish` missing |
 | 400 | `invalid_location` | unknown city, non-US state or coordinates, start = finish |
 | 422 | `routing_failed` | no drivable route (e.g. to Hawaii) |
-| 422 | `no_fuel_plan` | no station near the start, or a gap longer than 500 miles |
+| 422 | `no_fuel_plan` | no station within 500 miles of the start, or a gap longer than 500 miles |
+| 429 | `throttled` | more than 60 requests per minute from one IP |
 | 502 / 503 / 504 | `routing_failed` | routing provider down, quota or key problem, timeout |
 
 A Postman collection with example requests and tests is in [`postman/`](postman/fuel-route-optimizer.postman_collection.json).
@@ -101,7 +102,7 @@ A Postman collection with example requests and tests is in [`postman/`](postman/
 
 - **Fuel stations are geocoded to their city.** The CSV has no coordinates, and its addresses are highway exits such as `I-44, EXIT 283`. Each station gets its city's coordinate, taken from a bundled US places table. No geocoding API is used.
 - **On the route** means within **5 miles** of the road. The detour to the station isn't added to the distance.
-- **The truck starts empty.** Its first fill-up is the cheapest station within the first 25 miles, and the fuel used to get there is billed at that station. So total gallons always equal distance ÷ 10 mpg.
+- **The truck starts empty.** Its first fill-up is the cheapest station within the first 25 miles (or, if there is none, the first station on the route). The fuel used to get there is billed at that station, so total gallons always equal distance ÷ 10 mpg.
 - **Any amount can be bought at a stop.** The truck arrives at the destination with an empty tank.
 - **Duplicate station IDs** in the CSV (597 of them) keep their **lowest price**. **Canadian stations** are excluded.
 
@@ -110,7 +111,7 @@ All of these are configurable through environment variables (see `.env.example`)
 ## Tests and code quality
 
 ```bash
-pytest            # 88 tests, no network needed (the routing API is mocked)
+pytest            # 91 tests, no network needed (the routing API is mocked)
 ruff check .      # lint
 ruff format .     # format
 ```

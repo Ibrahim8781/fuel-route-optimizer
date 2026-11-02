@@ -52,9 +52,18 @@ def test_skips_stations_it_does_not_need():
     assert stops(result) == [(0, 45.0)]
 
 
-def test_no_station_near_start():
-    with pytest.raises(FuelPlanError, match="within 25 miles of the start"):
-        plan([(40, 3.00)], route_miles=300)
+def test_no_station_in_start_window_uses_first_station_on_route():
+    result = plan([(40, 3.50), (60, 3.00)], route_miles=300)
+    # Nothing within 25 miles: the truck starts with enough fuel to reach mile 40 and is billed for it there.
+    assert stops(result) == [(0, 6.0), (1, 24.0)]
+    assert result.total_gallons == pytest.approx(30.0)
+
+
+def test_no_station_reachable_from_start():
+    with pytest.raises(FuelPlanError, match="within 500 miles of the start"):
+        plan([(600, 3.00)], route_miles=900)
+    with pytest.raises(FuelPlanError, match="within 500 miles of the start"):
+        plan([], route_miles=300)
 
 
 def test_gap_longer_than_range():

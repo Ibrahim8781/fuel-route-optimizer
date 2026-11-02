@@ -147,6 +147,9 @@ LOGGING = {
     },
 }
 
+# Send the site origin (not the full URL) with cross-site requests, so map tile servers can see who is asking.
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
 # --- Security (effective when DEBUG is off and served over HTTPS) -------------
 
 if not DEBUG:

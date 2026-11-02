@@ -90,7 +90,7 @@ Response for New York → Los Angeles (real run, trimmed):
 
 Repeat the same request and `meta` shows `"routing_api_calls": 0, "route_cache_hit": true`, answered in about 25 ms.
 
-**Map:** open `map_url` in a browser to see the route and numbered fuel stops, drawn with Leaflet and OpenStreetMap. The map reuses the cached route, so it doesn't call the routing API again.
+**Map:** open `map_url` in a browser to see the route and numbered fuel stops, drawn with Leaflet on CARTO's free OpenStreetMap basemap. The map reuses the cached route, so it doesn't call the routing API again.
 
 **Errors** always use the same shape: `{"error": {"code": "...", "message": "..."}}`.
 
@@ -159,4 +159,4 @@ docs/DESIGN.md              design and walkthrough
 
 ## Data credits
 
-Fuel prices are from the assessment. City coordinates come from [GeoNames](https://www.geonames.org/) (CC BY 4.0) via the [`zipcodes`](https://github.com/seanpianka/zipcodes) package. Routing is by [OpenRouteService](https://openrouteservice.org/), and map tiles are © OpenStreetMap contributors.
+Fuel prices are from the assessment. City coordinates come from [GeoNames](https://www.geonames.org/) (CC BY 4.0) via the [`zipcodes`](https://github.com/seanpianka/zipcodes) package. Routing is by [OpenRouteService](https://openrouteservice.org/), and the map tiles are © OpenStreetMap contributors and © CARTO.

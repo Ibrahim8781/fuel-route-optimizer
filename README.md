@@ -6,6 +6,8 @@ A Django REST API that plans a truck trip between two US locations. It returns t
 - **Fast:** about 25 ms of our own work for a coast-to-coast trip. The routing provider adds 1–2 s, but only the first time a trip is requested.
 - **Optimal fuel plan:** dynamic programming that minimises fuel cost plus a small cost per stop ($10 by default; `stop_cost=0` for the cheapest fuel). It's checked against LP/MILP solvers in the tests.
 
+![New York to Los Angeles: 7 stops, one routing call](docs/demo.gif)
+
 > Design decisions, architecture and the algorithm are explained in **[docs/DESIGN.md](docs/DESIGN.md)**.
 
 ---

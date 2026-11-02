@@ -15,7 +15,7 @@ This document goes in the order I approached the problem: requirements → data 
 | Free map/routing API | OpenRouteService (`driving-hgv` truck profile); OpenStreetMap tiles |
 | Latest stable Django | Django 6.1 + Django REST framework |
 | Fast responses | ~25 ms of our own work on a coast-to-coast trip; the routing call adds 1–2 s only the first time |
-| Few routing API calls (1 ideal) | **Exactly 1** per new trip, **0** for repeated trips and for the map |
+| Few routing API calls (1 ideal) | **1** per new trip (up to 3 only if the provider fails transiently and we retry), **0** for repeated trips and for the map |
 
 ## 2. What the data told me
 
@@ -133,17 +133,17 @@ best[f] = cheapest cost to be at this station with f units of fuel
 - **Performance:** no database access on the hot path (stations are in memory), vectorised numpy (KD-tree and a DP done with array operations), a 1-point-per-mile route, and a route cache. The heavy geometry comes last in the response.
 - **External API usage:** 1 call per new trip, 0 when cached. Concurrent requests for the same new trip wait for one call instead of each making their own. "No route" answers are cached for an hour. Per-IP rate limiting (60/min), shared by the API and the map page, protects the free quota. The client IP comes from the socket, not a spoofable `X-Forwarded-For`, unless `DJANGO_BEHIND_PROXY` is set.
 - **Consistent errors:** every error, including 404, 500, throttling and wrong HTTP method, returns `{"error": {"code", "message"}}`. Unhandled exceptions are logged with their traceback.
-- **Reliability:** 10 s timeout; transient failures (dropped connection, 502/503/504) are retried twice with backoff over a keep-alive session. Provider errors map to our own messages: 422 when the trip can't be routed, 502 for anything else (details go to the log, not the client), 503 for quota or key problems, 504 on timeout.
+- **Reliability:** 3 s connect and 10 s read timeouts. A failed connection or a 502/503/504 is retried twice with backoff over a keep-alive session. A read timeout is not retried, so a hung provider costs about 10 s, not 30, and returns 504. `Retry-After` is ignored so the provider can't hold a worker for minutes. Provider errors map to our own messages: 422 when the trip can't be routed, 502 for anything else (details go to the log, not the client), 503 for quota or key problems, 504 on timeout.
 - **Security:** secrets come from the environment (`.env` is git-ignored), and the app refuses to start without a secret key when DEBUG is off. Input lengths are validated, map popups escape station data, and the app has a minimal surface (no admin, sessions or auth).
 - **Observability:** every routing call is logged with its timing. Each response includes `meta` (routing API calls, cache hit, stations considered, elapsed ms).
-- **Testability:** 126 tests with no network. The optimizer is a pure function checked against LP/MILP solvers.
+- **Testability:** 131 tests with no network. The optimizer is a pure function checked against LP/MILP solvers.
 - **Scalability:** the web tier is stateless. With `REDIS_URL` set (required for more than one worker), all workers share the route cache, the request lock and the rate-limit counters. `/api/health/` is there for load balancers.
 
 ## 8. Limitations and next steps
 
 - **City-level station positions.** Using exit numbers or a geocoded address list would allow a tighter corridor and real detour distances.
 - **Detours aren't priced.** A station up to 5 miles off the route is treated as being on it; the 15-mile reserve keeps that safe. Adding each station's detour to its cost is a small extension to the DP.
-- **The "in the USA" check** for raw coordinates is "within 25 miles of a US city", so points just across the border (Tijuana, Vancouver) are accepted.
+- **The "in the USA" check** for raw coordinates is "within 25 miles of a US town". Points just across the border (Tijuana, Vancouver) are accepted, and a few very remote US points (central Nevada on US-50, about 31 mi from a town) are rejected with a message that says so. 25 miles is the trade-off: at 33 miles Toronto would pass.
 - **The routing call is synchronous.** It ties up a worker for up to about 10 s. At scale, move route fetching to a task queue or an async view.
 - **Larger datasets:** move stations to PostGIS and use `ST_DWithin` along the route line.
 - **Prices change:** schedule `load_data` against a live price feed.

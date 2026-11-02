@@ -58,7 +58,10 @@ def resolve_location(text: str) -> Location:
     if match := _LAT_LON.match(text):
         lat, lon = float(match[1]), float(match[2])
         if not is_in_usa(lat, lon):
-            raise LocationError(f"'{text}' is outside the USA. Coordinates must be 'lat,lon' within the USA.")
+            raise LocationError(
+                f"'{text}' is outside the USA: coordinates must be within {MAX_MILES_FROM_US_PLACE} miles of a "
+                "US town. For a remote point, use the nearest town's name instead."
+            )
         return Location(label=f"{lat:.5f},{lon:.5f}", lat=lat, lon=lon)
 
     city, _, state = text.rpartition(",")

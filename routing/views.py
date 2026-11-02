@@ -1,8 +1,9 @@
+from django.core.cache import cache
 from django.http import JsonResponse
 from django.urls import reverse
 from django.utils.http import urlencode
 from rest_framework import serializers, status
-from rest_framework.renderers import TemplateHTMLRenderer
+from rest_framework.renderers import JSONRenderer, TemplateHTMLRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView, exception_handler
 
@@ -75,24 +76,36 @@ class RouteMapView(APIView):
     A DRF view so it shares the API's rate limit: a cache miss here also calls the routing provider.
     """
 
-    renderer_classes = [TemplateHTMLRenderer]
+    renderer_classes = [TemplateHTMLRenderer, JSONRenderer]  # HTML for browsers; JSON if asked for
     template_name = "routing/map.html"
 
     def get(self, request):
         plan, error, http_status = run_plan(request.query_params)
         return Response({"plan": plan, "error": error}, status=http_status)
 
+    def handle_exception(self, exc):
+        """Show framework errors (e.g. 429 throttled) on the styled map page, not as plain text."""
+        response = super().handle_exception(exc)
+        response.data = {"plan": None, "error": response.data}
+        response.exception = False  # render map.html with the error instead of DRF's plain-text page
+        return response
+
 
 class HealthView(APIView):
-    """GET /api/health/ for load balancers: the app is up and station data is loaded."""
+    """GET /api/health/ for load balancers: station data is loaded and the cache (e.g. Redis) works."""
 
     throttle_classes = []
 
     def get(self, request):
         stations = len(get_station_index())
-        return Response(
-            {"status": "ok" if stations else "no_data", "stations": stations}, status=200 if stations else 503
-        )
+        try:
+            cache.set("health:probe", 1, 10)
+            cache_ok = cache.get("health:probe") == 1
+        except Exception:  # noqa: BLE001 - any cache backend failure means "unhealthy"
+            cache_ok = False
+        healthy = bool(stations) and cache_ok
+        body = {"status": "ok" if healthy else "unhealthy", "stations": stations, "cache": cache_ok}
+        return Response(body, status=200 if healthy else 503)
 
 
 def not_found(request, exception=None):

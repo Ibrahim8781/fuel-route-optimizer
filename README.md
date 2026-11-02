@@ -121,7 +121,7 @@ All of these are configurable through environment variables (see `.env.example`)
 ## Tests and code quality
 
 ```bash
-pytest            # 126 tests, no network needed (the routing API is mocked)
+pytest            # 131 tests, no network needed (the routing API is mocked)
 ruff check .      # lint
 ruff format .     # format
 ```
@@ -154,7 +154,7 @@ docs/DESIGN.md              design and walkthrough
 - Set `DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`, and serve with gunicorn (`gunicorn fuelroute.wsgi -w 4`).
 - **With more than one worker, set `REDIS_URL`.** Otherwise each worker has its own route cache and rate-limit counters.
 - Set `DJANGO_BEHIND_PROXY=True` only behind nginx or a load balancer. Then the client IP and HTTPS come from `X-Forwarded-*`. Without a proxy those headers are ignored, so they can't be used to dodge the rate limit.
-- `GET /api/health/` returns 200 once station data is loaded, for load-balancer health checks.
+- `GET /api/health/` returns 200 only when station data is loaded and the cache (Redis) is reachable, for load-balancer health checks.
 - Requests are rate limited (default `60/minute` per IP) to protect the free routing quota.
 
 ## Data credits

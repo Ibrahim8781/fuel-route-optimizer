@@ -1,5 +1,8 @@
 """API, map and routing-client tests. The routing provider is always mocked: no network in tests."""
 
+import socket
+import threading
+import time
 from unittest import mock
 
 import numpy as np
@@ -176,7 +179,7 @@ def test_unhandled_exception_returns_json_500(trip_data):
 
 
 def test_health(client, trip_data):
-    assert client.get("/api/health/").json() == {"status": "ok", "stations": 6}
+    assert client.get("/api/health/").json() == {"status": "ok", "stations": 6, "cache": True}
 
 
 def test_framework_errors_use_the_same_shape(client, db):
@@ -214,7 +217,22 @@ def test_map_page_shares_the_rate_limit(client, trip_data, mock_routing, strict_
     trip = {"start": "Chicago, IL", "finish": "Denver, CO"}
     client.get(URL, trip)
     client.get("/map/", trip)
-    assert client.get("/map/", trip).status_code == 429
+    response = client.get("/map/", trip)
+    assert response.status_code == 429
+    assert b"Could not plan this trip" in response.content  # styled page, not plain text
+
+
+def test_map_page_can_return_json(client, trip_data, mock_routing):
+    response = client.get("/map/", {"start": "Chicago, IL", "finish": "Denver, CO"}, HTTP_ACCEPT="application/json")
+    assert response.status_code == 200
+    assert response.json()["plan"]["summary"]["fuel_stops"] == 3
+
+
+def test_health_fails_when_cache_is_down(client, trip_data):
+    with mock.patch("routing.views.cache.set", side_effect=ConnectionError("redis down")):
+        response = client.get("/api/health/")
+    assert response.status_code == 503
+    assert response.json()["cache"] is False
 
 
 # --- OpenRouteService client --------------------------------------------------
@@ -285,3 +303,82 @@ def test_ors_requires_api_key(settings):
     settings.ORS_API_KEY = ""
     with pytest.raises(RoutingError, match="ORS_API_KEY"):
         fetch_route(START, FINISH)
+
+
+# --- Real sockets: retry and timeout behaviour against a misbehaving local "provider" ----------
+
+
+class FakeProvider:
+    """A local HTTP server that either never answers or always answers 503 with Retry-After: 30."""
+
+    def __init__(self, mode):
+        self.mode, self.requests = mode, 0
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen()
+        self.url = f"http://127.0.0.1:{self.server.getsockname()[1]}"
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            self.requests += 1
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += conn.recv(65536)
+            head, _, body = request.partition(b"\r\n\r\n")
+            length = int(
+                next(line.split(b":")[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length"))
+            )
+            while len(body) < length:
+                body += conn.recv(65536)
+            if self.mode == "503":
+                conn.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nContent-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                conn.close()
+            # mode "hang": keep the connection open and never answer
+
+
+def test_hung_provider_times_out_once_with_504(settings):
+    provider = FakeProvider("hang")
+    settings.ORS_BASE_URL, settings.ORS_TIMEOUT_SECONDS = provider.url, 0.5
+    started = time.monotonic()
+    with pytest.raises(RoutingError) as error:
+        fetch_route(START, FINISH)
+    assert error.value.status == 504
+    assert time.monotonic() - started < 2  # one read timeout, no retries
+    assert provider.requests == 1
+
+
+def test_provider_503_is_retried_twice_and_retry_after_is_ignored(settings):
+    provider = FakeProvider("503")
+    settings.ORS_BASE_URL = provider.url
+    started = time.monotonic()
+    with pytest.raises(RoutingError) as error:
+        fetch_route(START, FINISH)
+    assert error.value.status == 502
+    assert provider.requests == 3  # first try + 2 retries
+    assert time.monotonic() - started < 5  # backoff only, not Retry-After: 30
+
+
+def test_concurrent_requests_for_a_new_trip_make_one_provider_call():
+    from routing.services.planner import get_route
+
+    def slow_route(start, finish):
+        time.sleep(0.5)
+        return straight_route(CHICAGO, DENVER)
+
+    results = []
+    with mock.patch("routing.services.planner.fetch_route", side_effect=slow_route) as fake:
+        threads = [threading.Thread(target=lambda: results.append(get_route(START, FINISH))) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    assert fake.call_count == 1
+    assert sorted(from_cache for _, from_cache in results) == [False, True, True, True]

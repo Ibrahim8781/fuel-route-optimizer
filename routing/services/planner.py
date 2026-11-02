@@ -10,7 +10,7 @@ from django.core.cache import cache
 from routing.services.geo import resample, stations_near_route
 from routing.services.locations import Location, LocationError, resolve_location
 from routing.services.optimizer import Candidate, plan_fuel_stops
-from routing.services.ors import RoutingError, fetch_route
+from routing.services.ors import RoutingError, fetch_route, worst_case_seconds
 from routing.services.stations import get_station_index
 
 ROUTE_STEP_MILES = 1.0  # spacing of route points used for matching and for the map
@@ -112,14 +112,19 @@ def get_route(start: Location, finish: Location) -> tuple[dict, bool]:
     if (cached := _cached_route(key)) is not None:
         return cached, True
 
+    # Waiters wait as long as one complete provider call can take, and the lock outlives that,
+    # so a slow provider still gets one call per trip rather than one per waiting request.
+    wait = worst_case_seconds()
     lock = f"{key}:lock"
-    if not cache.add(lock, True, timeout=int(settings.ORS_TIMEOUT_SECONDS * 3)):
-        # Another request is already fetching this trip; wait briefly for its result.
-        for _ in range(int(settings.ORS_TIMEOUT_SECONDS * 5)):
+    if not cache.add(lock, True, timeout=int(wait) + 5):
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
             time.sleep(0.2)
             if (cached := _cached_route(key)) is not None:
                 return cached, True
-        logger.warning("Timed out waiting for a concurrent route request; fetching it here.")
+            if cache.get(lock) is None:  # the other request failed without caching anything
+                break
+        logger.warning("No result from the concurrent route request; fetching it here.")
 
     try:
         try:

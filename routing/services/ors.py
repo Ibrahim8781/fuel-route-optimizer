@@ -1,4 +1,4 @@
-"""OpenRouteService directions client: one request per route (retried only on transient failures)."""
+"""OpenRouteService directions client: one request per route (up to 3 only on transient failures)."""
 
 import logging
 import time
@@ -13,21 +13,32 @@ from routing.services.locations import Location
 
 logger = logging.getLogger(__name__)
 
-# One shared session: keeps connections alive and retries twice (0.5 s, 1 s) when the provider
-# drops the connection or answers 502/503/504. A real answer, including 4xx, is never retried.
-session = requests.Session()
-session.mount(
-    "https://",
-    HTTPAdapter(
-        max_retries=Retry(
-            total=2,
-            backoff_factor=0.5,
-            status_forcelist=(502, 503, 504),
-            allowed_methods=frozenset({"POST"}),
-            raise_on_status=False,
-        )
-    ),
+# One shared session (keeps connections alive). Retries are only for failures that are cheap and
+# safe to repeat: a refused/failed connection or a 502/503/504 answer, at most twice (0.5 s, 1 s).
+# A read timeout is NOT retried (read=False), so a hung provider costs one timeout, not three,
+# and surfaces as a 504. Retry-After is ignored so the provider can't park a worker for minutes.
+RETRY = Retry(
+    total=2,
+    connect=2,
+    read=False,
+    status=2,
+    other=0,
+    backoff_factor=0.5,
+    status_forcelist=(502, 503, 504),
+    allowed_methods=frozenset({"POST"}),
+    raise_on_status=False,
+    respect_retry_after_header=False,
 )
+CONNECT_TIMEOUT_SECONDS = 3.05
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=RETRY))
+session.mount("http://", HTTPAdapter(max_retries=RETRY))
+
+
+def worst_case_seconds() -> float:
+    """Longest one fetch_route call can take: 3 connection attempts with backoff, then one read."""
+    return 3 * CONNECT_TIMEOUT_SECONDS + 1.5 + settings.ORS_TIMEOUT_SECONDS
+
 
 # ORS error codes that mean "this trip can't be routed", as opposed to a bad request from us.
 NO_ROUTE_CODES = {
@@ -61,7 +72,7 @@ def fetch_route(start: Location, finish: Location) -> Route:
         "coordinates": [[start.lon, start.lat], [finish.lon, finish.lat]],  # ORS expects [lon, lat]
         "units": "mi",
         "instructions": False,
-        "radiuses": [-1, -1],  # snap city centre points to the nearest road, however far
+        "radiuses": [-1, -1],  # snap to a road within the provider's maximum radius (350 m on the public API)
     }
     started = time.perf_counter()
     try:
@@ -69,7 +80,7 @@ def fetch_route(start: Location, finish: Location) -> Route:
             url,
             json=body,
             headers={"Authorization": settings.ORS_API_KEY},
-            timeout=settings.ORS_TIMEOUT_SECONDS,
+            timeout=(CONNECT_TIMEOUT_SECONDS, settings.ORS_TIMEOUT_SECONDS),
         )
     except requests.Timeout as exc:
         raise RoutingError("The routing service timed out.", status=504) from exc

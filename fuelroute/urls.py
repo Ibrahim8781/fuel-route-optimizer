@@ -1,3 +1,5 @@
-from django.urls import path  # noqa: F401
+from django.urls import include, path
 
-urlpatterns = []
+urlpatterns = [
+    path("", include("routing.urls")),
+]

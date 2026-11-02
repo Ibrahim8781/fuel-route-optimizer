@@ -266,6 +266,74 @@
               ]
             }
           }
+        },
+        {
+          "name": "5. Cheapest fuel only, any number of stops (stop_cost=0)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"gallons = distance / 10 mpg\", () => pm.expect(body.summary.total_gallons).to.be.closeTo(body.summary.distance_miles / 10, 0.05));",
+                  "pm.test(\"stop costs add up to the total\", () => pm.expect(body.fuel_stops.reduce((t, s) => t + s.cost_usd, 0)).to.be.closeTo(body.summary.total_fuel_cost_usd, 0.05));",
+                  "pm.test(\"no single leg is longer than 500 miles\", () => {",
+                  "  const marks = [0, ...body.fuel_stops.map(s => s.mile_marker), body.summary.distance_miles];",
+                  "  for (let i = 1; i < marks.length; i++) pm.expect(marks[i] - marks[i - 1]).to.be.at.most(500.5);",
+                  "});",
+                  "pm.test(\"at most one routing API call\", () => pm.expect(body.meta.routing_api_calls).to.be.at.most(1));",
+                  "const template = `",
+                  "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">",
+                  "<div id=\"map\" style=\"height: 520px\"></div>",
+                  "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>",
+                  "<script>",
+                  "  pm.getData(function (err, plan) {",
+                  "    const map = L.map(\"map\");",
+                  "    L.tileLayer(\"https://tile.openstreetmap.org/{z}/{x}/{y}.png\", { attribution: \"&copy; OpenStreetMap\" }).addTo(map);",
+                  "    const line = L.polyline(plan.route.coordinates.map(c => [c[1], c[0]]), { color: \"#2563eb\", weight: 4 }).addTo(map);",
+                  "    map.fitBounds(line.getBounds());",
+                  "    plan.fuel_stops.forEach(s => L.marker([s.lat, s.lon]).addTo(map)",
+                  "      .bindTooltip(s.stop + \". \" + s.city + \", \" + s.state + \" $\" + s.price_per_gallon, { permanent: true }));",
+                  "  });",
+                  "</script>`;",
+                  "if (pm.response.code === 200) { pm.visualizer.set(template, pm.response.json()); }",
+                  "pm.test(\"stop cost applied\", () => pm.expect(body.assumptions.cost_per_stop_usd).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Same trip with stop_cost=0: slightly cheaper fuel but many more stops. Compare with request 1.",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=New York, NY&finish=Los Angeles, CA&stop_cost=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "New York, NY"
+                },
+                {
+                  "key": "finish",
+                  "value": "Los Angeles, CA"
+                },
+                {
+                  "key": "stop_cost",
+                  "value": "0"
+                }
+              ]
+            }
+          }
         }
       ]
     },
@@ -306,6 +374,53 @@
                 {
                   "key": "start",
                   "value": "Chicago, IL"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Invalid stop_cost",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 with code invalid_request\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql(\"invalid_request\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/api/route/?start=Chicago, IL&finish=Denver, CO&stop_cost=-5",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "Chicago, IL"
+                },
+                {
+                  "key": "finish",
+                  "value": "Denver, CO"
+                },
+                {
+                  "key": "stop_cost",
+                  "value": "-5"
                 }
               ]
             }

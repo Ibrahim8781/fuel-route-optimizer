@@ -1,33 +1,36 @@
-"""Cheapest fuel plan along a fixed route (pure Python, no Django).
+"""Cheapest fuel plan along a fixed route (pure Python + numpy, no Django).
 
 Model
 -----
-* The route is a line from mile 0 to `route_miles`. Each candidate station has
-  a mile marker and a price. The tank holds `max_range / mpg` gallons.
-* The truck starts with an empty tank, so the first fill-up is the cheapest
+* The route runs from mile 0 to `route_miles`. Each candidate station has a mile
+  marker and a price. The tank holds `max_range` miles of fuel (`max_range / mpg`
+  gallons), and any amount can be bought at a stop.
+* The truck starts with an empty tank, so the first stop is the cheapest
   station within the first `start_window` miles (or, if there is none, the
   first station on the route). The miles driven to get there are billed at
   that station, so total gallons always equal route_miles / mpg.
-* The truck may buy any amount at a stop and should arrive with an empty tank.
+* Every stop also costs `stop_cost` dollars (time off the road). This stops the
+  plan from making an extra stop to save a cent per gallon. With `stop_cost=0`
+  the plan is simply the cheapest fuel.
 
-Greedy rule (optimal for this model)
-------------------------------------
-At each stop, look at the stations reachable on a full tank:
+Algorithm: dynamic programming over the fuel level
+--------------------------------------------------
+Fuel is measured in small units (`resolution` miles of range). Stations are
+visited in route order, and we keep one array:
 
-1. If a cheaper station is reachable, buy only enough to get to the nearest
-   such station. Fuel bought here would cost more than fuel bought there.
-2. Otherwise, if the destination is reachable, buy just enough to finish.
-3. Otherwise this is the cheapest fuel in range: fill the tank, then drive to
-   the cheapest station in range (the farthest one if prices tie).
+    best[f] = lowest cost to be at this station with f units of fuel
 
-Exchange argument: any gallon burned between this stop and the next cheaper
-station must be bought here or at a more expensive station, so buying it here
-is never worse. Each step moves forward, so the loop runs O(n x k) for n
-stations and k stations within range (n is a few hundred on a long route).
+At a station whose fuel costs c per unit, filling up from g to f units costs
+best[g] + c * (f - g) + stop_cost. For every f we need the best g < f, which
+is a running (prefix) minimum of best[g] - c * g, so one pass is O(T) for a
+tank of T units. Driving d units to the next station shifts the array by d.
+Total: O(n * T) for n stations, a few milliseconds for a coast-to-coast route.
+The result is exact for station positions rounded to `resolution`.
 """
 
-from bisect import bisect_right
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -61,8 +64,10 @@ def plan_fuel_stops(
     max_range: float = 500.0,
     mpg: float = 10.0,
     start_window: float = 25.0,
+    stop_cost: float = 0.0,
+    resolution: float = 0.5,
 ) -> FuelPlan:
-    """Return the purchases that minimise fuel cost.
+    """Return the purchases that minimise fuel cost plus `stop_cost` per stop.
 
     `stations` must be sorted by mile marker.
     """
@@ -72,52 +77,69 @@ def plan_fuel_stops(
     on_route = [i for i, s in enumerate(stations) if s.mile <= route_miles]
     if not on_route or stations[on_route[0]].mile > max_range:
         raise FuelPlanError(f"No fuel station within {max_range:g} miles of the start.")
-    first_window = [i for i in on_route if stations[i].mile <= start_window] or on_route[:1]
 
-    tank = max_range / mpg
-    miles = [s.mile for s in stations]
-    gallons_at: dict[int, float] = {}
+    # First stop: cheapest station near the start (nearer one if prices tie).
+    window = [i for i in on_route if stations[i].mile <= start_window] or on_route[:1]
+    first = min(window, key=lambda i: (stations[i].price, stations[i].mile))
+    usable = [i for i in on_route if i >= first]
+    start_mile = stations[first].mile
 
-    def buy(index: int, gallons: float) -> None:
-        if gallons > 1e-9:
-            gallons_at[index] = gallons_at.get(index, 0.0) + gallons
+    # Positions in fuel units, measured from the first stop.
+    positions = [round((stations[i].mile - start_mile) / resolution) for i in usable]
+    positions.append(round((route_miles - start_mile) / resolution))  # destination
+    tank = round(max_range / resolution)
+    levels = np.arange(tank + 1)
+    # A tiny cost per stop even when stop_cost is 0, so equal-cost plans prefer fewer stops.
+    per_stop = max(stop_cost, 1e-6)
 
-    # First fill-up: cheapest station near the start (nearer one if prices tie).
-    current = min(first_window, key=lambda i: (stations[i].price, stations[i].mile))
-    buy(current, stations[current].mile / mpg)  # fuel used to reach it
-    fuel = 0.0  # gallons in the tank on arrival at `current`
+    best = np.full(tank + 1, np.inf)
+    best[0] = 0.0  # arrive at the first stop empty
+    sources = []  # sources[k][f]: fuel level before buying at station k, for each level f after buying
+    for k, i in enumerate(usable):
+        unit_price = stations[i].price * resolution / mpg
+        # Cheapest way to reach level f by buying here: min over g < f of (best[g] - unit_price * g).
+        adjusted = best - unit_price * levels
+        prefix_min = np.minimum.accumulate(adjusted)
+        prefix_arg = np.maximum.accumulate(np.where(adjusted == prefix_min, levels, 0))
+        buy_cost = np.full(tank + 1, np.inf)
+        buy_cost[1:] = prefix_min[:-1] + unit_price * levels[1:] + per_stop
 
-    while True:
-        here = stations[current]
-        reach = here.mile + max_range
-        # Stations ahead that a full tank can reach (stations past the destination are useless).
-        in_range = range(current + 1, bisect_right(miles, min(reach, route_miles)))
+        buy = buy_cost < best
+        after = np.where(buy, buy_cost, best)
+        sources.append(np.where(buy, np.concatenate(([0], prefix_arg[:-1])), levels))
 
-        cheaper = next((i for i in in_range if stations[i].price < here.price), None)
-        if cheaper is not None:
-            needed = (stations[cheaper].mile - here.mile) / mpg
-            buy(current, needed - fuel)
-            fuel = max(fuel - needed, 0.0)
-            current = cheaper
-            continue
-
-        if reach >= route_miles:
-            buy(current, (route_miles - here.mile) / mpg - fuel)
-            break
-
-        if not in_range:
-            next_mile = next((s.mile for s in stations[current + 1 :]), route_miles)
+        # Drive to the next station (or the destination): fuel drops by the distance.
+        distance = positions[k + 1] - positions[k]
+        best = np.full(tank + 1, np.inf)
+        if distance <= tank:
+            best[: tank + 1 - distance] = after[distance:]
+        if not np.isfinite(best).any():
+            next_mile = stations[usable[k + 1]].mile if k + 1 < len(usable) else route_miles
             raise FuelPlanError(
-                f"No fuel station between mile {here.mile:.0f} and mile {next_mile:.0f}; "
+                f"No fuel station between mile {stations[i].mile:.0f} and mile {next_mile:.0f}; "
                 f"the gap exceeds the {max_range:g}-mile range."
             )
 
-        buy(current, tank - fuel)
-        cheapest = min(in_range, key=lambda i: (stations[i].price, -stations[i].mile))
-        fuel = tank - (stations[cheapest].mile - here.mile) / mpg
-        current = cheapest
+    # Walk back from the destination (arriving with the least fuel) to recover the purchases.
+    fuel = int(np.argmin(best))
+    bought: dict[int, int] = {}
+    for k in range(len(usable) - 1, -1, -1):
+        level_after = fuel + positions[k + 1] - positions[k]
+        fuel = int(sources[k][level_after])
+        if level_after > fuel:
+            bought[usable[k]] = level_after - fuel
 
-    purchases = [Purchase(index=i, gallons=g, cost=g * stations[i].price) for i, g in sorted(gallons_at.items())]
+    gallons_at = {i: units * resolution / mpg for i, units in bought.items()}
+    gallons_at[first] = gallons_at.get(first, 0.0) + start_mile / mpg
+    # Positions were rounded to `resolution`; the last stop absorbs the (< 0.05 gal) difference
+    # so total gallons equal route_miles / mpg exactly.
+    gallons_at[max(gallons_at)] += route_miles / mpg - sum(gallons_at.values())
+
+    purchases = [
+        Purchase(index=i, gallons=gallons, cost=gallons * stations[i].price)
+        for i, gallons in sorted(gallons_at.items())
+        if gallons > 1e-9
+    ]
     return FuelPlan(
         purchases=purchases,
         total_gallons=sum(p.gallons for p in purchases),

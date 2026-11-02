@@ -50,7 +50,7 @@
           </li>
         {% endfor %}
       </ol>
-      <p class="muted">Range {{ plan.assumptions.max_range_miles }} mi &middot; {{ plan.assumptions.miles_per_gallon }} mpg &middot; Starting fuel: {{ plan.assumptions.starting_fuel }}</p>
+      <p class="muted">Range {{ plan.assumptions.max_range_miles }} mi &middot; {{ plan.assumptions.miles_per_gallon }} mpg &middot; ${{ plan.assumptions.cost_per_stop_usd }} per stop &middot; Starting fuel: {{ plan.assumptions.starting_fuel }}</p>
     {% endif %}
   </aside>
   <div id="map"></div>

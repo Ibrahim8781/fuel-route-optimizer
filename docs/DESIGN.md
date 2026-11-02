@@ -8,13 +8,13 @@ This document goes in the order I approached the problem: requirements → data 
 |---|---|
 | Start and finish inside the USA | `City, ST`, `City, State` or `lat,lon`, resolved offline and checked against US bounds |
 | Map of the route | GeoJSON `route` in the response, plus a Leaflet map at `map_url` |
-| Cost-effective fuel stops | Greedy algorithm that is optimal for a fixed route (section 5) |
+| Cost-effective fuel stops | Dynamic programming: cheapest fuel plus a small cost per stop, solved exactly (section 5) |
 | 500-mile range, multiple stops | Tank = 500 mi ÷ 10 mpg = 50 gal; the plan never exceeds it |
 | Total fuel cost at 10 mpg | `summary.total_fuel_cost_usd`; total gallons = distance ÷ 10 |
 | Use the provided price file | Loaded once by `manage.py load_data` |
 | Free map/routing API | OpenRouteService (`driving-hgv` truck profile); OpenStreetMap tiles |
 | Latest stable Django | Django 6.1 + Django REST framework |
-| Fast responses | ~35 ms server-side work per new trip, ~6 ms when cached |
+| Fast responses | ~25 ms of our own work on a coast-to-coast trip; the routing call adds 1–2 s only the first time |
 | Few routing API calls (1 ideal) | **Exactly 1** per new trip, **0** for repeated trips and for the map |
 
 ## 2. What the data told me
@@ -35,7 +35,7 @@ I inspected the CSV before designing anything:
 | **One routing call, cached by coordinates** | Meets the "1 call" requirement; repeated trips and the map cost 0 calls | Cache must be shared across workers in production (Redis supported) |
 | **Resample the route to 1 point per mile** | Uniform accuracy (≤ 0.5 mi) and a small payload (~60 KB for a coast-to-coast trip) | Curves are slightly smoothed on the map |
 | **KD-tree corridor search** | Finds stations within 5 mi of the route in O(S log R) | Uses a radius, not exact distance to each road segment |
-| **Greedy fuel algorithm** | Provably optimal for a fixed route, simple, O(n·k) | Ignores time spent per stop |
+| **DP optimizer with a cost per stop** | Exact optimum; avoids extra stops to save a cent per gallon; `stop_cost=0` gives the pure cheapest | Positions rounded to 0.5 mile inside the optimizer |
 | **Stations held in memory; SQLite** | The data is static and small (6.6k rows), so the DB isn't on the request path | Restart the server after reloading the data |
 
 ## 4. Architecture
@@ -53,7 +53,7 @@ flowchart LR
     P --> SI[Station index<br/>in memory, numpy]
     SI -.loaded once.-> DB
     P --> G[geo<br/>KD-tree corridor]
-    P --> O[optimizer<br/>greedy, pure Python]
+    P --> O[optimizer<br/>dynamic programming]
     LD[manage.py load_data] -->|one-time| DB
 ```
 
@@ -74,31 +74,43 @@ sequenceDiagram
         API->>Cache: store resampled route (24 h)
     end
     API->>API: KD-tree: stations within 5 mi + mile markers
-    API->>API: greedy optimizer: stops + cost
+    API->>API: DP optimizer: stops + cost
     API-->>Client: JSON (summary, stops, map_url, route)
 ```
 
 ## 5. The fuel algorithm
 
-Stations near the route are sorted by **mile marker**. The tank holds 50 gallons (500 miles). At each stop:
+**The problem.** Stations near the route are sorted by mile marker. The tank holds 500 miles of fuel (50 gallons). We need to decide where to stop and how much to buy at each stop so that we never run dry and the total cost is as low as possible.
 
-1. **A cheaper station is reachable:** buy only enough to reach the **nearest** cheaper station.
-2. **Otherwise, the destination is reachable:** buy just enough to finish.
-3. **Otherwise, this is the cheapest fuel in range:** fill the tank, then drive to the **cheapest** station in range.
+**What "optimal" means here.** If we minimise fuel cost alone, the result is technically cheapest but unrealistic. On the real New York → Los Angeles route it makes **16 stops**: it buys 1.7 gallons in Omaha and stops again 17 miles later to save 0.6¢ a gallon. A stop costs a truck time, so I give every stop a cost (**$10 by default**, configurable, and `stop_cost=0` turns it off) and minimise **fuel cost + stop cost**.
 
-**Why it's optimal:** every gallon burned between here and the next cheaper station has to be bought here or at a more expensive station, so buying it here is never worse. When nothing cheaper is in range, filling up here covers as many miles as possible at the lowest available price. The test suite checks this by comparing the result with an exact linear-program solver on 40 random routes.
+**Dynamic programming.** Fuel is measured in units of 0.5 mile of range (the tank holds 1,000 units). Walking the stations in route order, we keep one array:
 
-**Start:** the truck starts empty, so its first fill-up is the cheapest station within 25 miles of the start. If there is none, it's the first station on the route. The fuel used to reach it is billed at that station.
+```
+best[f] = cheapest cost to be at this station with f units of fuel
+```
 
-**Worked example** (from the tests): stations at mile 0 ($3.00), 400 ($4.00) and 700 ($3.50); the trip is 900 miles.
-- Mile 0 is the cheapest fuel in range: fill 50 gal and go to the cheapest in range, mile 400, arriving with 10 gal.
-- At mile 400 the $3.50 station is reachable and cheaper: buy 20 gal, just enough to reach it.
-- At mile 700 the destination is reachable: buy 20 gal.
-- Total: 50×3 + 20×4 + 20×3.5 = **$300** for 90 gallons.
+- **Buy here** (price `c` per unit): reaching level `f` from a lower level `g` costs `best[g] + c·(f − g) + stop_cost`. The best `g` for every `f` is a running minimum of `best[g] − c·g`, so all levels are updated in one O(T) pass.
+- **Drive** `d` units to the next station: `best` shifts down by `d`, and levels below zero are impossible.
+- At the destination, take the cheapest level, then walk back to recover where and how much we bought.
 
-**Complexity:** finding the stations is O(R log R + S log R), for R route points and S stations. The optimizer is O(n·k), for n stations on the route and k within range, using a binary search for the range. On a 2,650-mile test route, the whole request takes about 35 ms of compute.
+**Start:** the truck starts empty, so its first stop is the cheapest station within 25 miles of the start. If there is none, it's the first station on the route. The fuel used to reach it is billed at that station, so total gallons = distance ÷ 10 mpg.
 
-Compared with a simpler "always fill up at the cheapest reachable station" strategy, on the same 2,650-mile test route this algorithm was **cheaper ($797 vs $808) and made fewer stops (10 vs 12)**.
+**Correctness:** the tests compare the optimizer with exact solvers on 60 random routes. With `stop_cost = 0` they use a linear program; with `stop_cost = 10` they use a mixed-integer program. Both match.
+
+**Complexity:** O(n · T), for n stations on the route and T = 1,000 fuel levels. Finding the stations is O(R log R + S log R) with a KD-tree. A coast-to-coast request takes about 25 ms of our own compute.
+
+**Real results** (OpenRouteService routes, provided price file):
+
+| Trip | Cheapest fuel only (`stop_cost=0`) | Default (`$10` per stop) |
+|---|---|---|
+| New York → Los Angeles (2,792 mi) | 16 stops, $852.77 | **7 stops, $858.78** (+0.7%) |
+| Chicago → Denver (1,002 mi) | 5 stops, $297.41 | **3 stops, $297.82** (+0.1%) |
+| Dallas → Houston (233 mi) | 1 stop, $64.10 | 1 stop, $64.10 |
+
+**Worked example** (from the tests): stations at mile 0 ($3.00) and mile 30 ($2.99); the trip is 400 miles.
+- Cheapest fuel: 3 gal at $3.00 to reach mile 30, then 37 gal at $2.99, for **$119.63 with 2 stops**.
+- With $10 per stop: 40 gal at $3.00, for **$120.00 with 1 stop**. That's 37¢ more but one fewer stop, so it wins.
 
 ## 6. Code tour
 
@@ -106,7 +118,7 @@ Compared with a simpler "always fill up at the cheapest reachable station" strat
 |---|---|
 | `routing/views.py` | DRF endpoint, input validation and error mapping; the map view |
 | `routing/services/planner.py` | Orchestrates one trip; caches the route |
-| `routing/services/optimizer.py` | The greedy algorithm; no Django, easy to test |
+| `routing/services/optimizer.py` | The DP fuel optimizer; no Django, easy to test |
 | `routing/services/geo.py` | Haversine, route resampling, KD-tree corridor search |
 | `routing/services/ors.py` | OpenRouteService client: one POST, clear errors |
 | `routing/services/locations.py` | Parses `City, ST` / `lat,lon`; US bounds check |
@@ -116,18 +128,18 @@ Compared with a simpler "always fill up at the cheapest reachable station" strat
 
 ## 7. Non-functional concerns
 
-- **Performance:** no database access on the hot path (stations are in memory), vectorised numpy and a KD-tree, a 1-point-per-mile route, and a route cache. The heavy geometry comes last in the response.
+- **Performance:** no database access on the hot path (stations are in memory), vectorised numpy (KD-tree and a DP done with array operations), a 1-point-per-mile route, and a route cache. The heavy geometry comes last in the response.
 - **External API usage:** 1 call per new trip, 0 when cached. Per-IP rate limiting (default 60/min) protects the free quota.
 - **Consistent errors:** every error, including throttling and wrong HTTP method, returns `{"error": {"code", "message"}}`.
 - **Reliability:** 20 s timeout on the routing call. Provider errors map to clear HTTP statuses: 422 when no route exists, 503 for quota or key problems, 504 on timeout.
 - **Security:** secrets come from the environment (`.env` is git-ignored), and the app refuses to start without a secret key when DEBUG is off. Input lengths are validated, map popups escape station data, and the app has a minimal surface (no admin, sessions or auth).
 - **Observability:** every routing call is logged with its timing. Each response includes `meta` (routing API calls, cache hit, stations considered, elapsed ms).
-- **Testability:** 91 tests with no network. The core algorithm is a pure function.
+- **Testability:** 117 tests with no network. The optimizer is a pure function checked against LP/MILP solvers.
 - **Scalability:** the web tier is stateless; with `REDIS_URL` set, all workers share the route cache. See the next steps for growing the data.
 
 ## 8. Limitations and next steps
 
 - **City-level station positions.** Using exit numbers or a geocoded address list would allow a tighter corridor and real detour distances.
-- **No cost per stop.** The plan may include small "bridge" top-ups. A per-stop time or cost penalty would trade a few cents for fewer stops.
+- **Detours aren't priced.** A station up to 5 miles off the route is treated as being on it. Adding the detour distance to that station's cost is a small extension to the DP.
 - **Larger datasets:** move stations to PostGIS and use `ST_DWithin` along the route line.
 - **Prices change:** schedule `load_data` against a live price feed.

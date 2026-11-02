@@ -15,8 +15,9 @@ from routing.services.stations import get_station_index
 ROUTE_STEP_MILES = 1.0  # spacing of route points used for matching and for the map
 
 
-def plan_trip(start_text: str, finish_text: str) -> dict:
+def plan_trip(start_text: str, finish_text: str, stop_cost: float | None = None) -> dict:
     started = time.perf_counter()
+    stop_cost = settings.FUEL_STOP_COST_USD if stop_cost is None else stop_cost
     start, finish = resolve_location(start_text), resolve_location(finish_text)
     if (start.lat, start.lon) == (finish.lat, finish.lon):
         raise LocationError("Start and finish are the same place.")
@@ -36,6 +37,7 @@ def plan_trip(start_text: str, finish_text: str) -> dict:
         max_range=settings.FUEL_MAX_RANGE_MILES,
         mpg=settings.FUEL_MPG,
         start_window=settings.FUEL_START_WINDOW_MILES,
+        stop_cost=stop_cost,
     )
 
     stops = []
@@ -74,6 +76,7 @@ def plan_trip(start_text: str, finish_text: str) -> dict:
             "max_range_miles": settings.FUEL_MAX_RANGE_MILES,
             "miles_per_gallon": settings.FUEL_MPG,
             "station_corridor_miles": settings.FUEL_CORRIDOR_MILES,
+            "cost_per_stop_usd": stop_cost,
             "starting_fuel": (
                 f"empty; first fill-up at the cheapest station within {settings.FUEL_START_WINDOW_MILES:g} miles "
                 "(or the first station on the route), billed for the miles driven to reach it"

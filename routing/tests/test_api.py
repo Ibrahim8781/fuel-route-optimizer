@@ -90,6 +90,14 @@ def test_plan_success(client, trip_data, mock_routing):
     assert list(body)[-1] == "route"  # big geometry last
 
 
+def test_stop_cost_parameter(client, trip_data, mock_routing):
+    body = client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO", "stop_cost": "0"}).json()
+    assert body["assumptions"]["cost_per_stop_usd"] == 0
+    assert "stop_cost=0" in body["map_url"]
+    default = client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"}).json()
+    assert default["assumptions"]["cost_per_stop_usd"] == 10
+
+
 def test_second_request_uses_cache(client, trip_data, mock_routing):
     client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"})
     body = client.get(URL, {"start": "chicago, il", "finish": "Denver, CO"}).json()
@@ -119,6 +127,8 @@ def test_map_page_shows_errors(client, trip_data):
         ({"start": "Chicago, IL", "finish": "Gotham, NY"}, "invalid_location"),
         ({"start": "Chicago, IL", "finish": "Toronto, ON"}, "invalid_location"),
         ({"start": "Chicago, IL", "finish": "Chicago, IL"}, "invalid_location"),
+        ({"start": "Chicago, IL", "finish": "Denver, CO", "stop_cost": "-1"}, "invalid_request"),
+        ({"start": "Chicago, IL", "finish": "Denver, CO", "stop_cost": "abc"}, "invalid_request"),
     ],
 )
 def test_bad_input_returns_400(client, trip_data, mock_routing, params, code):

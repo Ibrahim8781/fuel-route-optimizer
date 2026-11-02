@@ -14,6 +14,9 @@ from routing.services.planner import plan_trip
 class TripQuerySerializer(serializers.Serializer):
     start = serializers.CharField(max_length=100, help_text='"City, ST" or "lat,lon"')
     finish = serializers.CharField(max_length=100, help_text='"City, ST" or "lat,lon"')
+    stop_cost = serializers.FloatField(
+        required=False, min_value=0, max_value=1000, help_text="USD per fuel stop; 0 = cheapest fuel"
+    )
 
 
 def error_body(code: str, message: str, **extra) -> dict:
@@ -32,10 +35,10 @@ def run_plan(query) -> tuple[dict | None, dict | None, int]:
     """Validate the query and plan the trip. Returns (plan, error, http_status)."""
     serializer = TripQuerySerializer(data=query)
     if not serializer.is_valid():
-        return None, error_body("invalid_request", "start and finish are required.", fields=serializer.errors), 400
+        return None, error_body("invalid_request", "Invalid query parameters.", fields=serializer.errors), 400
     data = serializer.validated_data
     try:
-        return plan_trip(data["start"], data["finish"]), None, 200
+        return plan_trip(data["start"], data["finish"], data.get("stop_cost")), None, 200
     except LocationError as exc:
         return None, error_body("invalid_location", str(exc)), 400
     except FuelPlanError as exc:
@@ -45,7 +48,7 @@ def run_plan(query) -> tuple[dict | None, dict | None, int]:
 
 
 class RoutePlanView(APIView):
-    """GET /api/route/?start=Chicago, IL&finish=Denver, CO
+    """GET /api/route/?start=Chicago, IL&finish=Denver, CO[&stop_cost=10]
 
     Returns the route geometry, the cheapest fuel stops (500-mile range) and the
     total fuel cost at 10 mpg, plus a link to the same trip on a map.
@@ -55,7 +58,9 @@ class RoutePlanView(APIView):
         plan, error, http_status = run_plan(request.query_params)
         if error:
             return Response(error, status=http_status)
-        query = urlencode({"start": request.query_params["start"], "finish": request.query_params["finish"]})
+        query = urlencode(
+            {k: request.query_params[k] for k in ("start", "finish", "stop_cost") if k in request.query_params}
+        )
         # Keep the large geometry last so the useful fields are at the top of the response.
         plan = {**plan, "map_url": request.build_absolute_uri(f"{reverse('route-map')}?{query}")}
         plan["route"] = plan.pop("route")

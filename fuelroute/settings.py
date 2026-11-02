@@ -118,6 +118,8 @@ FUEL_MPG = env_float("FUEL_MPG", 10)
 FUEL_CORRIDOR_MILES = env_float("FUEL_CORRIDOR_MILES", 5)
 # The truck starts empty, so its first fill-up must be within this many miles.
 FUEL_START_WINDOW_MILES = env_float("FUEL_START_WINDOW_MILES", 25)
+# Cost of making a stop (time off the road). Stops the plan from adding a stop to save a cent a gallon.
+FUEL_STOP_COST_USD = env_float("FUEL_STOP_COST_USD", 10)
 ROUTE_CACHE_SECONDS = int(env_float("ROUTE_CACHE_SECONDS", 24 * 60 * 60))
 
 # --- Logging ----------------------------------------------------------------

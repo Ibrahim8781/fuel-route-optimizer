@@ -5,10 +5,10 @@ Model
 * The route runs from mile 0 to `route_miles`. Each candidate station has a mile
   marker and a price. The tank holds `max_range` miles of fuel (`max_range / mpg`
   gallons), and any amount can be bought at a stop.
-* The truck starts with an empty tank, so the first stop is the cheapest
+* The truck starts with just enough fuel to reach its first stop: the cheapest
   station within the first `start_window` miles (or, if there is none, the
-  first station on the route). The miles driven to get there are billed at
-  that station, so total gallons always equal route_miles / mpg.
+  first station on the route). That fuel is billed at the first stop, so
+  total gallons always equal route_miles / mpg.
 * Every stop also costs `stop_cost` dollars (time off the road). This stops the
   plan from making an extra stop to save a cent per gallon. With `stop_cost=0`
   the plan is simply the cheapest fuel.
@@ -75,8 +75,12 @@ def plan_fuel_stops(
         return FuelPlan(purchases=[], total_gallons=0.0, total_cost=0.0)
 
     on_route = [i for i, s in enumerate(stations) if s.mile <= route_miles]
-    if not on_route or stations[on_route[0]].mile > max_range:
-        raise FuelPlanError(f"No fuel station within {max_range:g} miles of the start.")
+    if not on_route:
+        raise FuelPlanError("No fuel station along this route, so the fuel cost can't be priced.")
+    if stations[on_route[0]].mile > max_range:
+        raise FuelPlanError(
+            f"The first fuel station is at mile {stations[on_route[0]].mile:.0f}, beyond the {max_range:g}-mile range."
+        )
 
     # First stop: cheapest station near the start (nearer one if prices tie).
     window = [i for i in on_route if stations[i].mile <= start_window] or on_route[:1]

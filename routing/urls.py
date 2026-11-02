@@ -1,8 +1,9 @@
 from django.urls import path
 
-from routing.views import RoutePlanView, route_map
+from routing.views import HealthView, RouteMapView, RoutePlanView
 
 urlpatterns = [
     path("api/route/", RoutePlanView.as_view(), name="route-plan"),
-    path("map/", route_map, name="route-map"),
+    path("api/health/", HealthView.as_view(), name="health"),
+    path("map/", RouteMapView.as_view(), name="route-map"),
 ]

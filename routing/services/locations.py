@@ -2,13 +2,22 @@
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+
+import numpy as np
+from scipy.spatial import cKDTree
 
 from routing.models import Place
+from routing.services.geo import EARTH_RADIUS_MILES, to_unit_vectors
 from routing.text import normalize_place_name, to_state_code
 
 _LAT_LON = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
 
-# Rough bounding boxes (south, north, west, east) for the lower 48, Alaska and Hawaii.
+# A coordinate counts as "in the USA" if it is this close to a known US city (the boxes alone
+# also cover southern Canada and northern Mexico).
+MAX_MILES_FROM_US_PLACE = 25
+
+# Rough bounding boxes (south, north, west, east) for the lower 48, Alaska and Hawaii: a quick first filter.
 _US_BOXES = (
     (24.3, 49.5, -125.0, -66.8),
     (51.0, 71.6, -180.0, -129.9),
@@ -27,8 +36,20 @@ class Location:
     lon: float
 
 
+@lru_cache(maxsize=1)
+def _place_tree() -> cKDTree | None:
+    points = np.array(list(Place.objects.values_list("lat", "lon")))
+    return cKDTree(to_unit_vectors(points[:, 0], points[:, 1])) if len(points) else None
+
+
 def is_in_usa(lat: float, lon: float) -> bool:
-    return any(south <= lat <= north and west <= lon <= east for south, north, west, east in _US_BOXES)
+    if not any(south <= lat <= north and west <= lon <= east for south, north, west, east in _US_BOXES):
+        return False
+    tree = _place_tree()
+    if tree is None:  # places not loaded yet: fall back to the boxes
+        return True
+    chord, _ = tree.query(to_unit_vectors(np.array([lat]), np.array([lon]))[0])
+    return 2 * EARTH_RADIUS_MILES * np.arcsin(chord / 2) <= MAX_MILES_FROM_US_PLACE
 
 
 def resolve_location(text: str) -> Location:

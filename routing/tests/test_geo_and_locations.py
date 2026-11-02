@@ -55,7 +55,7 @@ def test_resolve_city_variants(places, text):
     assert (location.lat, location.lon) == (38.6445, -90.2496)
 
 
-def test_resolve_coordinates():
+def test_resolve_coordinates(db):
     location = resolve_location(" 32.7767, -96.7970 ")
     assert (location.lat, location.lon) == (32.7767, -96.797)
 
@@ -67,6 +67,7 @@ def test_resolve_coordinates():
         ("Toronto, ON", "not a US state"),
         ("Atlantis, TX", "Unknown city"),
         ("51.05,-114.07", "outside the USA"),  # Calgary
+        ("43.65,-79.38", "outside the USA"),  # Toronto: inside the rough US box, but far from any US city
         ("48.85,2.35", "outside the USA"),  # Paris
     ],
 )

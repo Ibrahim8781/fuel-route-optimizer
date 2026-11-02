@@ -1,5 +1,6 @@
 """Orchestrates a trip: resolve locations -> route (cached) -> stations on route -> cheapest fuel plan."""
 
+import logging
 import time
 
 import numpy as np
@@ -9,10 +10,12 @@ from django.core.cache import cache
 from routing.services.geo import resample, stations_near_route
 from routing.services.locations import Location, LocationError, resolve_location
 from routing.services.optimizer import Candidate, plan_fuel_stops
-from routing.services.ors import fetch_route
+from routing.services.ors import RoutingError, fetch_route
 from routing.services.stations import get_station_index
 
 ROUTE_STEP_MILES = 1.0  # spacing of route points used for matching and for the map
+
+logger = logging.getLogger(__name__)
 
 
 def plan_trip(start_text: str, finish_text: str, stop_cost: float | None = None) -> dict:
@@ -34,7 +37,7 @@ def plan_trip(start_text: str, finish_text: str, stop_cost: float | None = None)
     plan = plan_fuel_stops(
         candidates,
         distance,
-        max_range=settings.FUEL_MAX_RANGE_MILES,
+        max_range=settings.FUEL_MAX_RANGE_MILES - settings.FUEL_RESERVE_MILES,
         mpg=settings.FUEL_MPG,
         start_window=settings.FUEL_START_WINDOW_MILES,
         stop_cost=stop_cost,
@@ -74,12 +77,13 @@ def plan_trip(start_text: str, finish_text: str, stop_cost: float | None = None)
         },
         "assumptions": {
             "max_range_miles": settings.FUEL_MAX_RANGE_MILES,
+            "reserve_miles": settings.FUEL_RESERVE_MILES,
             "miles_per_gallon": settings.FUEL_MPG,
             "station_corridor_miles": settings.FUEL_CORRIDOR_MILES,
             "cost_per_stop_usd": stop_cost,
             "starting_fuel": (
-                f"empty; first fill-up at the cheapest station within {settings.FUEL_START_WINDOW_MILES:g} miles "
-                "(or the first station on the route), billed for the miles driven to reach it"
+                "just enough to reach the first stop (the cheapest station within "
+                f"{settings.FUEL_START_WINDOW_MILES:g} miles, or the first on the route), billed at that stop"
             ),
         },
         "fuel_stops": stops,
@@ -100,25 +104,51 @@ def get_route(start: Location, finish: Location) -> tuple[dict, bool]:
     """Route between two points, from cache when possible. Returns (route, from_cache).
 
     Only the resampled geometry is cached (about one point per mile), which is
-    all the planner and the map need and keeps cache entries small.
+    all the planner and the map need and keeps cache entries small. Trips with
+    no route are cached for an hour, and concurrent requests for the same new
+    trip wait for one provider call instead of each making their own.
     """
-    key = f"route:v1:{settings.ORS_PROFILE}:{start.lat:.5f},{start.lon:.5f}:{finish.lat:.5f},{finish.lon:.5f}"
-    if (cached := cache.get(key)) is not None:
+    key = f"route:v2:{settings.ORS_PROFILE}:{start.lat:.5f},{start.lon:.5f}:{finish.lat:.5f},{finish.lon:.5f}"
+    if (cached := _cached_route(key)) is not None:
         return cached, True
 
-    route = fetch_route(start, finish)
-    points, markers = resample(np.array(route.points), ROUTE_STEP_MILES)
-    # Scale our haversine mile markers to the provider's road distance so both agree at the destination.
-    if markers[-1] > 0:
-        markers = markers * (route.distance_miles / markers[-1])
-    value = {
-        "points": points.tolist(),
-        "markers": markers.tolist(),
-        "distance_miles": route.distance_miles,
-        "duration_seconds": route.duration_seconds,
-    }
-    cache.set(key, value, settings.ROUTE_CACHE_SECONDS)
-    return value, False
+    lock = f"{key}:lock"
+    if not cache.add(lock, True, timeout=int(settings.ORS_TIMEOUT_SECONDS * 3)):
+        # Another request is already fetching this trip; wait briefly for its result.
+        for _ in range(int(settings.ORS_TIMEOUT_SECONDS * 5)):
+            time.sleep(0.2)
+            if (cached := _cached_route(key)) is not None:
+                return cached, True
+        logger.warning("Timed out waiting for a concurrent route request; fetching it here.")
+
+    try:
+        try:
+            route = fetch_route(start, finish)
+        except RoutingError as exc:
+            if exc.status == 422:  # the trip itself is impossible; don't ask again for a while
+                cache.set(key, {"error": str(exc)}, settings.FAILED_ROUTE_CACHE_SECONDS)
+            raise
+        points, markers = resample(np.array(route.points), ROUTE_STEP_MILES)
+        # Scale our haversine mile markers to the provider's road distance so both agree at the destination.
+        if markers[-1] > 0:
+            markers = markers * (route.distance_miles / markers[-1])
+        value = {
+            "points": points.tolist(),
+            "markers": markers.tolist(),
+            "distance_miles": route.distance_miles,
+            "duration_seconds": route.duration_seconds,
+        }
+        cache.set(key, value, settings.ROUTE_CACHE_SECONDS)
+        return value, False
+    finally:
+        cache.delete(lock)
+
+
+def _cached_route(key: str) -> dict | None:
+    cached = cache.get(key)
+    if cached is not None and "error" in cached:
+        raise RoutingError(cached["error"], status=422)
+    return cached
 
 
 def _location_json(query: str, location: Location) -> dict:

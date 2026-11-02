@@ -88,10 +88,12 @@ def test_stop_cost_never_breaks_the_range_limit():
 
 
 def test_no_station_reachable_from_start():
-    with pytest.raises(FuelPlanError, match="within 500 miles of the start"):
+    with pytest.raises(FuelPlanError, match="first fuel station is at mile 600"):
         plan([(600, 3.00)], route_miles=900)
-    with pytest.raises(FuelPlanError, match="within 500 miles of the start"):
-        plan([], route_miles=300)
+    with pytest.raises(FuelPlanError, match="No fuel station along this route"):
+        plan([], route_miles=20)
+    with pytest.raises(FuelPlanError, match="No fuel station along this route"):
+        plan([(30, 3.00)], route_miles=20)  # only station is past the destination
 
 
 def test_gap_longer_than_range():

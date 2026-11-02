@@ -63,12 +63,12 @@ Response for New York → Los Angeles (real run, trimmed):
     "duration_hours": 64.6,
     "fuel_stops": 7,
     "total_gallons": 279.15,
-    "total_fuel_cost_usd": 858.78,
-    "average_price_per_gallon": 3.076
+    "total_fuel_cost_usd": 862.01,
+    "average_price_per_gallon": 3.088
   },
   "assumptions": {
-    "max_range_miles": 500.0, "miles_per_gallon": 10.0, "station_corridor_miles": 5.0,
-    "cost_per_stop_usd": 10.0, "starting_fuel": "empty; first fill-up at the cheapest station within 25 miles (...)"
+    "max_range_miles": 500.0, "reserve_miles": 15.0, "miles_per_gallon": 10.0, "station_corridor_miles": 5.0,
+    "cost_per_stop_usd": 10.0, "starting_fuel": "just enough to reach the first stop (...), billed at that stop"
   },
   "fuel_stops": [
     {
@@ -79,7 +79,7 @@ Response for New York → Los Angeles (real run, trimmed):
     {
       "stop": 2, "station_id": 72445, "name": "SHEETZ #639", "address": "I-80 Exit 223",
       "city": "Youngstown", "state": "OH", "lat": 41.096, "lon": -80.6553,
-      "price_per_gallon": 3.059, "mile_marker": 388.1, "miles_off_route": 4.0, "gallons": 47.0, "cost_usd": 143.77
+      "price_per_gallon": 3.059, "mile_marker": 388.1, "miles_off_route": 4.0, "gallons": 46.3, "cost_usd": 141.63
     }
   ],
   "meta": {"routing_api_calls": 1, "route_cache_hit": false, "stations_on_route": 372, "elapsed_ms": 2115.8},
@@ -100,7 +100,8 @@ Repeat the same request and `meta` shows `"routing_api_calls": 0, "route_cache_h
 | 400 | `invalid_location` | unknown city, non-US state or coordinates, start = finish |
 | 422 | `routing_failed` | no drivable route (e.g. to Hawaii) |
 | 422 | `no_fuel_plan` | no station within 500 miles of the start, or a gap longer than 500 miles |
-| 429 | `throttled` | more than 60 requests per minute from one IP |
+| 429 | `throttled` | more than 60 requests per minute from one IP (API and map combined) |
+| 404 / 500 | `not_found` / `server_error` | unknown URL / unexpected failure (logged with traceback) |
 | 502 / 503 / 504 | `routing_failed` | routing provider down, quota or key problem, timeout |
 
 A Postman collection with example requests and tests is in [`postman/`](postman/fuel-route-optimizer.postman_collection.json).
@@ -109,9 +110,10 @@ A Postman collection with example requests and tests is in [`postman/`](postman/
 
 - **Fuel stations are geocoded to their city.** The CSV has no coordinates, and its addresses are highway exits such as `I-44, EXIT 283`. Each station gets its city's coordinate, taken from a bundled US places table. No geocoding API is used.
 - **On the route** means within **5 miles** of the road. The detour to the station isn't added to the distance.
-- **The truck starts empty.** Its first fill-up is the cheapest station within the first 25 miles (or, if there is none, the first station on the route). The fuel used to get there is billed at that station, so total gallons always equal distance ÷ 10 mpg.
+- **The truck starts with just enough fuel to reach its first stop**, which is the cheapest station within the first 25 miles (or, if there is none, the first station on the route). That fuel is billed at the first stop, so total gallons always equal distance ÷ 10 mpg.
+- **A 15-mile reserve is kept in the tank.** No leg is planned longer than 485 miles. That covers the detour to a station up to 5 miles off the road, and the city-level station positions.
 - **Any amount can be bought at a stop.** The truck arrives at the destination with an empty tank.
-- **Each stop costs $10** in time off the road (configurable; it's only used to choose stops and isn't included in the reported fuel cost). Without it, the cheapest plan for New York → LA makes 16 stops, some to save under a cent a gallon. With it, the plan makes 7 stops for 0.7% more fuel cost.
+- **Each stop costs $10** in time off the road (configurable; it's only used to choose stops and isn't included in the reported fuel cost). Without it, the cheapest plan for New York → LA makes 16 stops, some to save under a cent a gallon. With it, the plan makes 7 stops for 1% more fuel cost.
 - **Duplicate station IDs** in the CSV (597 of them) keep their **lowest price**. **Canadian stations** are excluded.
 
 All of these are configurable through environment variables (see `.env.example`).
@@ -119,7 +121,7 @@ All of these are configurable through environment variables (see `.env.example`)
 ## Tests and code quality
 
 ```bash
-pytest            # 117 tests, no network needed (the routing API is mocked)
+pytest            # 126 tests, no network needed (the routing API is mocked)
 ruff check .      # lint
 ruff format .     # format
 ```
@@ -149,8 +151,10 @@ docs/DESIGN.md              design and walkthrough
 
 ## Production notes
 
-- Set `DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`, and serve with a WSGI server such as gunicorn.
-- Set `REDIS_URL` so all workers share one route cache.
+- Set `DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`, and serve with gunicorn (`gunicorn fuelroute.wsgi -w 4`).
+- **With more than one worker, set `REDIS_URL`.** Otherwise each worker has its own route cache and rate-limit counters.
+- Set `DJANGO_BEHIND_PROXY=True` only behind nginx or a load balancer. Then the client IP and HTTPS come from `X-Forwarded-*`. Without a proxy those headers are ignored, so they can't be used to dodge the rate limit.
+- `GET /api/health/` returns 200 once station data is loaded, for load-balancer health checks.
 - Requests are rate limited (default `60/minute` per IP) to protect the free routing quota.
 
 ## Data credits

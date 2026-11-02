@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import requests
 from django.core.cache import cache
+from django.test import Client
 from rest_framework.throttling import AnonRateThrottle
 
 from routing.models import FuelStation, Place
@@ -14,7 +15,7 @@ from routing.services.geo import haversine_miles
 from routing.services.locations import Location
 from routing.services.ors import Route, RoutingError, fetch_route
 from routing.services.stations import get_station_index
-from routing.views import RoutePlanView
+from routing.views import RouteMapView, RoutePlanView
 
 URL = "/api/route/"
 CHICAGO = (41.85, -87.6779)
@@ -82,7 +83,7 @@ def test_plan_success(client, trip_data, mock_routing):
     # Cheapest near the start ($3.20) -> cheaper $2.90 at ~mile 410, fill up -> Denver (~915 mi) is
     # just out of range, so top up at the $3.10 station.
     assert [s["name"] for s in body["fuel_stops"]] == ["STOP 2", "STOP 4", "STOP 5"]
-    assert body["fuel_stops"][1]["gallons"] == 50.0
+    assert body["fuel_stops"][1]["gallons"] == 48.5  # full tank minus the 15-mile reserve
     assert sum(s["cost_usd"] for s in body["fuel_stops"]) == pytest.approx(summary["total_fuel_cost_usd"], abs=0.02)
     assert body["meta"]["routing_api_calls"] == 1
     assert body["route"]["type"] == "LineString"
@@ -152,20 +153,68 @@ def test_routing_failure_is_passed_through(client, trip_data):
     assert response.json()["error"] == {"code": "routing_failed", "message": "No drivable route"}
 
 
+def test_failed_routes_are_cached(client, trip_data):
+    failure = RoutingError("No drivable route between these locations.", 422)
+    with mock.patch("routing.services.planner.fetch_route", side_effect=failure) as fake:
+        for _ in range(3):
+            assert client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"}).status_code == 422
+    assert fake.call_count == 1
+
+
+def test_unknown_url_returns_json_404(client, db):
+    response = client.get("/nope/")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+def test_unhandled_exception_returns_json_500(trip_data):
+    client = Client(raise_request_exception=False)
+    with mock.patch("routing.views.plan_trip", side_effect=RuntimeError("boom")):
+        response = client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"})
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "server_error"
+
+
+def test_health(client, trip_data):
+    assert client.get("/api/health/").json() == {"status": "ok", "stations": 6}
+
+
 def test_framework_errors_use_the_same_shape(client, db):
     response = client.post(URL)
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "method_not_allowed"
 
 
-def test_rate_limit(client, trip_data, mock_routing):
-    class TwoPerMinute(AnonRateThrottle):
-        rate = "2/minute"
+class TwoPerMinute(AnonRateThrottle):
+    rate = "2/minute"
 
-    with mock.patch.object(RoutePlanView, "throttle_classes", [TwoPerMinute]):
-        responses = [client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"}) for _ in range(3)]
+
+@pytest.fixture
+def strict_rate_limit():
+    with (
+        mock.patch.object(RoutePlanView, "throttle_classes", [TwoPerMinute]),
+        mock.patch.object(RouteMapView, "throttle_classes", [TwoPerMinute]),
+    ):
+        yield
+
+
+def test_rate_limit(client, trip_data, mock_routing, strict_rate_limit):
+    responses = [client.get(URL, {"start": "Chicago, IL", "finish": "Denver, CO"}) for _ in range(3)]
     assert [r.status_code for r in responses] == [200, 200, 429]
     assert responses[-1].json()["error"]["code"] == "throttled"
+
+
+def test_rate_limit_ignores_spoofed_forwarded_for(client, trip_data, mock_routing, strict_rate_limit):
+    trip = {"start": "Chicago, IL", "finish": "Denver, CO"}
+    codes = [client.get(URL, trip, HTTP_X_FORWARDED_FOR=f"10.0.0.{n}").status_code for n in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_map_page_shares_the_rate_limit(client, trip_data, mock_routing, strict_rate_limit):
+    trip = {"start": "Chicago, IL", "finish": "Denver, CO"}
+    client.get(URL, trip)
+    client.get("/map/", trip)
+    assert client.get("/map/", trip).status_code == 429
 
 
 # --- OpenRouteService client --------------------------------------------------
@@ -175,7 +224,7 @@ FINISH = Location("Denver, CO", *DENVER)
 
 
 def fake_response(status, payload):
-    response = mock.Mock(status_code=status)
+    response = mock.Mock(status_code=status, text="")
     response.json.return_value = payload
     return response
 
@@ -189,7 +238,7 @@ def test_ors_parses_geojson():
             }
         ]
     }
-    with mock.patch.object(ors.requests, "post", return_value=fake_response(200, payload)) as post:
+    with mock.patch.object(ors.session, "post", return_value=fake_response(200, payload)) as post:
         route = fetch_route(START, FINISH)
     assert route.points == [(41.85, -87.67), (39.73, -104.99)]  # converted to (lat, lon)
     assert route.distance_miles == 1003.2
@@ -200,6 +249,7 @@ def test_ors_parses_geojson():
     ("status", "payload", "expected_status"),
     [
         (404, {"error": {"code": 2009, "message": "Route could not be found"}}, 422),
+        (400, {"error": {"code": 2003, "message": "Parameter 'units' has incorrect value"}}, 502),  # our bug
         (401, {"error": "Invalid key"}, 503),
         (429, {}, 503),
         (500, {}, 502),
@@ -208,15 +258,25 @@ def test_ors_parses_geojson():
 )
 def test_ors_errors(status, payload, expected_status):
     with (
-        mock.patch.object(ors.requests, "post", return_value=fake_response(status, payload)),
+        mock.patch.object(ors.session, "post", return_value=fake_response(status, payload)),
         pytest.raises(RoutingError) as error,
     ):
         fetch_route(START, FINISH)
     assert error.value.status == expected_status
 
 
+def test_ors_hides_provider_details():
+    payload = {"error": {"code": 2009, "message": "Unable to find a route between points 1 (-157.85 21.30) and 2"}}
+    with (
+        mock.patch.object(ors.session, "post", return_value=fake_response(404, payload)),
+        pytest.raises(RoutingError) as error,
+    ):
+        fetch_route(START, FINISH)
+    assert str(error.value) == "No drivable route between these locations."
+
+
 def test_ors_timeout():
-    with mock.patch.object(ors.requests, "post", side_effect=requests.Timeout), pytest.raises(RoutingError) as error:
+    with mock.patch.object(ors.session, "post", side_effect=requests.Timeout), pytest.raises(RoutingError) as error:
         fetch_route(START, FINISH)
     assert error.value.status == 504
 

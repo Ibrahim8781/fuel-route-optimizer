@@ -94,7 +94,9 @@ best[f] = cheapest cost to be at this station with f units of fuel
 - **Drive** `d` units to the next station: `best` shifts down by `d`, and levels below zero are impossible.
 - At the destination, take the cheapest level, then walk back to recover where and how much we bought.
 
-**Start:** the truck starts empty, so its first stop is the cheapest station within 25 miles of the start. If there is none, it's the first station on the route. The fuel used to reach it is billed at that station, so total gallons = distance ÷ 10 mpg.
+**Start:** the truck starts with just enough fuel to reach its first stop, which is the cheapest station within 25 miles of the start, or the first station on the route if there is none. That fuel is billed at the first stop, so total gallons = distance ÷ 10 mpg.
+
+**Reserve:** the optimizer plans with 485 of the 500 miles, so every leg leaves a 15-mile reserve. That covers the detour to a station up to 5 miles off the road, and the city-level positions.
 
 **Correctness:** the tests compare the optimizer with exact solvers on 60 random routes. With `stop_cost = 0` they use a linear program; with `stop_cost = 10` they use a mixed-integer program. Both match.
 
@@ -104,7 +106,7 @@ best[f] = cheapest cost to be at this station with f units of fuel
 
 | Trip | Cheapest fuel only (`stop_cost=0`) | Default (`$10` per stop) |
 |---|---|---|
-| New York → Los Angeles (2,792 mi) | 16 stops, $852.77 | **7 stops, $858.78** (+0.7%) |
+| New York → Los Angeles (2,792 mi) | 16 stops, $853.35 | **7 stops, $862.01** (+1.0%) |
 | Chicago → Denver (1,002 mi) | 5 stops, $297.41 | **3 stops, $297.82** (+0.1%) |
 | Dallas → Houston (233 mi) | 1 stop, $64.10 | 1 stop, $64.10 |
 
@@ -129,17 +131,19 @@ best[f] = cheapest cost to be at this station with f units of fuel
 ## 7. Non-functional concerns
 
 - **Performance:** no database access on the hot path (stations are in memory), vectorised numpy (KD-tree and a DP done with array operations), a 1-point-per-mile route, and a route cache. The heavy geometry comes last in the response.
-- **External API usage:** 1 call per new trip, 0 when cached. Per-IP rate limiting (default 60/min) protects the free quota.
-- **Consistent errors:** every error, including throttling and wrong HTTP method, returns `{"error": {"code", "message"}}`.
-- **Reliability:** 20 s timeout on the routing call. Provider errors map to clear HTTP statuses: 422 when no route exists, 503 for quota or key problems, 504 on timeout.
+- **External API usage:** 1 call per new trip, 0 when cached. Concurrent requests for the same new trip wait for one call instead of each making their own. "No route" answers are cached for an hour. Per-IP rate limiting (60/min), shared by the API and the map page, protects the free quota. The client IP comes from the socket, not a spoofable `X-Forwarded-For`, unless `DJANGO_BEHIND_PROXY` is set.
+- **Consistent errors:** every error, including 404, 500, throttling and wrong HTTP method, returns `{"error": {"code", "message"}}`. Unhandled exceptions are logged with their traceback.
+- **Reliability:** 10 s timeout; transient failures (dropped connection, 502/503/504) are retried twice with backoff over a keep-alive session. Provider errors map to our own messages: 422 when the trip can't be routed, 502 for anything else (details go to the log, not the client), 503 for quota or key problems, 504 on timeout.
 - **Security:** secrets come from the environment (`.env` is git-ignored), and the app refuses to start without a secret key when DEBUG is off. Input lengths are validated, map popups escape station data, and the app has a minimal surface (no admin, sessions or auth).
 - **Observability:** every routing call is logged with its timing. Each response includes `meta` (routing API calls, cache hit, stations considered, elapsed ms).
-- **Testability:** 117 tests with no network. The optimizer is a pure function checked against LP/MILP solvers.
-- **Scalability:** the web tier is stateless; with `REDIS_URL` set, all workers share the route cache. See the next steps for growing the data.
+- **Testability:** 126 tests with no network. The optimizer is a pure function checked against LP/MILP solvers.
+- **Scalability:** the web tier is stateless. With `REDIS_URL` set (required for more than one worker), all workers share the route cache, the request lock and the rate-limit counters. `/api/health/` is there for load balancers.
 
 ## 8. Limitations and next steps
 
 - **City-level station positions.** Using exit numbers or a geocoded address list would allow a tighter corridor and real detour distances.
-- **Detours aren't priced.** A station up to 5 miles off the route is treated as being on it. Adding the detour distance to that station's cost is a small extension to the DP.
+- **Detours aren't priced.** A station up to 5 miles off the route is treated as being on it; the 15-mile reserve keeps that safe. Adding each station's detour to its cost is a small extension to the DP.
+- **The "in the USA" check** for raw coordinates is "within 25 miles of a US city", so points just across the border (Tijuana, Vancouver) are accepted.
+- **The routing call is synchronous.** It ties up a worker for up to about 10 s. At scale, move route fetching to a task queue or an async view.
 - **Larger datasets:** move stations to PostGIS and use `ST_DWithin` along the route line.
 - **Prices change:** schedule `load_data` against a live price feed.

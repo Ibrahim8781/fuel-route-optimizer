@@ -1,4 +1,4 @@
-"""OpenRouteService directions client: exactly one HTTP request per route."""
+"""OpenRouteService directions client: one request per route (retried only on transient failures)."""
 
 import logging
 import time
@@ -6,10 +6,35 @@ from dataclasses import dataclass
 
 import requests
 from django.conf import settings
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from routing.services.locations import Location
 
 logger = logging.getLogger(__name__)
+
+# One shared session: keeps connections alive and retries twice (0.5 s, 1 s) when the provider
+# drops the connection or answers 502/503/504. A real answer, including 4xx, is never retried.
+session = requests.Session()
+session.mount(
+    "https://",
+    HTTPAdapter(
+        max_retries=Retry(
+            total=2,
+            backoff_factor=0.5,
+            status_forcelist=(502, 503, 504),
+            allowed_methods=frozenset({"POST"}),
+            raise_on_status=False,
+        )
+    ),
+)
+
+# ORS error codes that mean "this trip can't be routed", as opposed to a bad request from us.
+NO_ROUTE_CODES = {
+    2004: "The trip is longer than the routing provider allows (6,000 km).",
+    2009: "No drivable route between these locations.",
+    2010: "The start or finish is too far from any road.",
+}
 
 
 class RoutingError(Exception):
@@ -40,7 +65,7 @@ def fetch_route(start: Location, finish: Location) -> Route:
     }
     started = time.perf_counter()
     try:
-        response = requests.post(
+        response = session.post(
             url,
             json=body,
             headers={"Authorization": settings.ORS_API_KEY},
@@ -49,6 +74,7 @@ def fetch_route(start: Location, finish: Location) -> Route:
     except requests.Timeout as exc:
         raise RoutingError("The routing service timed out.", status=504) from exc
     except requests.RequestException as exc:
+        logger.warning("ORS request failed: %s", exc)
         raise RoutingError("The routing service is unreachable.") from exc
     logger.info(
         "ORS directions %s -> %s: HTTP %s in %.0f ms",
@@ -62,10 +88,12 @@ def fetch_route(start: Location, finish: Location) -> Route:
         raise RoutingError("Routing quota exceeded; try again shortly.", status=503)
     if response.status_code in (401, 403):
         raise RoutingError("The routing service rejected the API key.", status=503)
-    if 400 <= response.status_code < 500:
-        # e.g. no road connection, or route longer than the provider allows (6,000 km).
-        raise RoutingError(f"No drivable route found: {_error_message(response)}", status=422)
     if response.status_code != 200:
+        code, detail = _error_details(response)
+        # The provider's own message stays in our logs; clients get a stable message of ours.
+        logger.warning("ORS error HTTP %s code %s: %s", response.status_code, code, detail)
+        if code in NO_ROUTE_CODES:
+            raise RoutingError(NO_ROUTE_CODES[code], status=422)
         raise RoutingError(f"The routing service failed (HTTP {response.status_code}).")
 
     try:
@@ -81,8 +109,9 @@ def fetch_route(start: Location, finish: Location) -> Route:
         raise RoutingError("The routing service returned an unexpected response.") from exc
 
 
-def _error_message(response: requests.Response) -> str:
+def _error_details(response: requests.Response) -> tuple[int | None, str]:
     try:
-        return str(response.json()["error"]["message"])
+        error = response.json()["error"]
+        return (error.get("code"), str(error.get("message"))) if isinstance(error, dict) else (None, str(error))
     except (ValueError, KeyError, TypeError):
-        return f"HTTP {response.status_code}"
+        return None, response.text[:200]

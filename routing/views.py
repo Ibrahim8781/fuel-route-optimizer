@@ -1,7 +1,8 @@
-from django.shortcuts import render
+from django.http import JsonResponse
 from django.urls import reverse
 from django.utils.http import urlencode
 from rest_framework import serializers, status
+from rest_framework.renderers import TemplateHTMLRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView, exception_handler
 
@@ -9,6 +10,7 @@ from routing.services.locations import LocationError
 from routing.services.optimizer import FuelPlanError
 from routing.services.ors import RoutingError
 from routing.services.planner import plan_trip
+from routing.services.stations import get_station_index
 
 
 class TripQuerySerializer(serializers.Serializer):
@@ -67,7 +69,37 @@ class RoutePlanView(APIView):
         return Response(plan, status=status.HTTP_200_OK)
 
 
-def route_map(request):
-    """GET /map/?start=...&finish=... renders the same plan with Leaflet (uses the cached route)."""
-    plan, error, http_status = run_plan(request.GET)
-    return render(request, "routing/map.html", {"plan": plan, "error": error}, status=http_status)
+class RouteMapView(APIView):
+    """GET /map/?start=...&finish=... renders the same plan with Leaflet.
+
+    A DRF view so it shares the API's rate limit: a cache miss here also calls the routing provider.
+    """
+
+    renderer_classes = [TemplateHTMLRenderer]
+    template_name = "routing/map.html"
+
+    def get(self, request):
+        plan, error, http_status = run_plan(request.query_params)
+        return Response({"plan": plan, "error": error}, status=http_status)
+
+
+class HealthView(APIView):
+    """GET /api/health/ for load balancers: the app is up and station data is loaded."""
+
+    throttle_classes = []
+
+    def get(self, request):
+        stations = len(get_station_index())
+        return Response(
+            {"status": "ok" if stations else "no_data", "stations": stations}, status=200 if stations else 503
+        )
+
+
+def not_found(request, exception=None):
+    return JsonResponse(
+        error_body("not_found", "No such endpoint. Use GET /api/route/?start=...&finish=..."), status=404
+    )
+
+
+def server_error(request):
+    return JsonResponse(error_body("server_error", "Something went wrong on our side."), status=500)

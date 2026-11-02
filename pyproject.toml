@@ -1,5 +1,5 @@
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "fuelroute.settings"
+DJANGO_SETTINGS_MODULE = "fuelroute.test_settings"
 python_files = ["test_*.py"]
 addopts = "-q"
 
